@@ -1,0 +1,7 @@
+.venv/
+transcripts/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+.dockerignore

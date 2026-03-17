@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Captions</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: #1a1a2e;
+            color: #e0e0e0;
+            min-height: 100vh;
+        }
+        header {
+            padding: 0.75rem 1.5rem;
+            background: #16213e;
+            border-bottom: 1px solid #0f3460;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+        header h1 { font-size: 1.1rem; font-weight: 600; color: #e94560; }
+        .spacer { flex: 1; }
+        a.nav-link {
+            color: #a0c4ff;
+            text-decoration: none;
+            font-size: 0.85rem;
+            padding: 0.4rem 0.75rem;
+            border-radius: 6px;
+            border: 1px solid #1a4f8a;
+        }
+        a.nav-link:hover { background: #1a4f8a; }
+        .container { max-width: 600px; margin: 2rem auto; padding: 0 1.5rem; }
+
+        .upload-area {
+            border: 2px dashed #0f3460;
+            border-radius: 12px;
+            padding: 3rem 2rem;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.2s, background 0.2s;
+        }
+        .upload-area:hover, .upload-area.dragover {
+            border-color: #e94560;
+            background: rgba(233, 69, 96, 0.05);
+        }
+        .upload-area h2 { font-size: 1.1rem; color: #e94560; margin-bottom: 0.5rem; }
+        .upload-area p { font-size: 0.85rem; color: #888; }
+        .upload-area input { display: none; }
+
+        .progress-section {
+            display: none;
+            margin-top: 2rem;
+        }
+        .progress-bar-bg {
+            background: #0f3460;
+            border-radius: 8px;
+            height: 8px;
+            overflow: hidden;
+            margin-bottom: 0.75rem;
+        }
+        .progress-bar-fill {
+            height: 100%;
+            background: #e94560;
+            border-radius: 8px;
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+        .progress-message {
+            font-size: 0.85rem;
+            color: #888;
+            text-align: center;
+        }
+
+        .download-section {
+            display: none;
+            margin-top: 2rem;
+        }
+        .download-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        .download-item {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            padding: 1rem 1.25rem;
+            background: #16213e;
+            border-radius: 8px;
+            border: 1px solid #0f3460;
+            text-decoration: none;
+            color: #e0e0e0;
+            transition: border-color 0.15s;
+        }
+        .download-item:hover { border-color: #e94560; }
+        .download-label { flex: 1; font-size: 0.95rem; }
+        .download-badge {
+            font-size: 0.75rem;
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            background: rgba(233, 69, 96, 0.15);
+            color: #e94560;
+        }
+        .detected-lang {
+            text-align: center;
+            font-size: 0.85rem;
+            color: #888;
+            margin-bottom: 1rem;
+        }
+        .error-message {
+            display: none;
+            margin-top: 2rem;
+            padding: 1rem;
+            background: rgba(233, 69, 96, 0.1);
+            border: 1px solid #e94560;
+            border-radius: 8px;
+            color: #f4a0a0;
+            font-size: 0.9rem;
+            text-align: center;
+        }
+        .reset-link {
+            display: none;
+            margin-top: 1.5rem;
+            text-align: center;
+        }
+        .reset-link a {
+            color: #a0c4ff;
+            text-decoration: none;
+            font-size: 0.85rem;
+            cursor: pointer;
+        }
+        .reset-link a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Video Captions</h1>
+        <div class="spacer"></div>
+        <a class="nav-link" href="/">Live</a>
+        <a class="nav-link" href="/history">History</a>
+    </header>
+    <div class="container">
+        <div class="upload-area" id="upload-area">
+            <h2>Upload a video</h2>
+            <p>Drop a video file here or click to browse</p>
+            <input type="file" id="file-input" accept="video/*,audio/*">
+        </div>
+
+        <div class="progress-section" id="progress-section">
+            <div class="progress-bar-bg">
+                <div class="progress-bar-fill" id="progress-bar"></div>
+            </div>
+            <div class="progress-message" id="progress-message">Starting...</div>
+        </div>
+
+        <div class="error-message" id="error-message"></div>
+
+        <div class="download-section" id="download-section">
+            <div class="detected-lang" id="detected-lang"></div>
+            <div class="download-list" id="download-list"></div>
+        </div>
+
+        <div class="reset-link" id="reset-link">
+            <a onclick="resetForm()">Process another video</a>
+        </div>
+    </div>
+
+    <script>
+        const uploadArea = document.getElementById('upload-area');
+        const fileInput = document.getElementById('file-input');
+        const progressSection = document.getElementById('progress-section');
+        const progressBar = document.getElementById('progress-bar');
+        const progressMessage = document.getElementById('progress-message');
+        const downloadSection = document.getElementById('download-section');
+        const downloadList = document.getElementById('download-list');
+        const detectedLang = document.getElementById('detected-lang');
+        const errorMessage = document.getElementById('error-message');
+        const resetLink = document.getElementById('reset-link');
+
+        uploadArea.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length) uploadFile(e.target.files[0]);
+        });
+
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            if (e.dataTransfer.files.length) uploadFile(e.dataTransfer.files[0]);
+        });
+
+        async function uploadFile(file) {
+            uploadArea.style.display = 'none';
+            progressSection.style.display = 'block';
+            progressMessage.textContent = 'Uploading...';
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const resp = await fetch('/captions/upload', { method: 'POST', body: formData });
+                const data = await resp.json();
+                if (data.error) throw new Error(data.error);
+                pollStatus(data.job_id);
+            } catch (err) {
+                showError(err.message);
+            }
+        }
+
+        function pollStatus(jobId) {
+            const interval = setInterval(async () => {
+                try {
+                    const resp = await fetch(`/captions/status/${jobId}`);
+                    const job = await resp.json();
+
+                    progressBar.style.width = job.progress + '%';
+                    progressMessage.textContent = job.message;
+
+                    if (job.status === 'done') {
+                        clearInterval(interval);
+                        showDownloads(jobId, job);
+                    } else if (job.status === 'error') {
+                        clearInterval(interval);
+                        showError(job.message);
+                    }
+                } catch (err) {
+                    clearInterval(interval);
+                    showError('Lost connection to server');
+                }
+            }, 1000);
+        }
+
+        function showDownloads(jobId, job) {
+            progressSection.style.display = 'none';
+            downloadSection.style.display = 'block';
+            resetLink.style.display = 'block';
+
+            const lang = job.detected_language || 'unknown';
+            detectedLang.textContent = `Detected: ${lang}`;
+
+            downloadList.innerHTML = '';
+            for (const filename of job.files) {
+                const a = document.createElement('a');
+                a.className = 'download-item';
+                a.href = `/captions/download/${jobId}/${filename}`;
+
+                const label = document.createElement('span');
+                label.className = 'download-label';
+                label.textContent = filename;
+
+                const badge = document.createElement('span');
+                badge.className = 'download-badge';
+                badge.textContent = filename.includes('.original.') ? 'Original' : 'Translated';
+
+                a.appendChild(label);
+                a.appendChild(badge);
+                downloadList.appendChild(a);
+            }
+        }
+
+        function showError(msg) {
+            progressSection.style.display = 'none';
+            errorMessage.style.display = 'block';
+            errorMessage.textContent = msg;
+            resetLink.style.display = 'block';
+        }
+
+        function resetForm() {
+            uploadArea.style.display = '';
+            progressSection.style.display = 'none';
+            downloadSection.style.display = 'none';
+            errorMessage.style.display = 'none';
+            resetLink.style.display = 'none';
+            progressBar.style.width = '0%';
+            fileInput.value = '';
+        }
+    </script>
+</body>
+</html>

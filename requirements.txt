@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+websockets
+jinja2
+sounddevice
+numpy
+scipy
+faster-whisper
+python-multipart
+argostranslate

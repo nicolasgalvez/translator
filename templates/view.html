@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ label }} — Transcript</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: #1a1a2e;
+            color: #e0e0e0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        header {
+            padding: 0.75rem 1.5rem;
+            background: #16213e;
+            border-bottom: 1px solid #0f3460;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+        header h1 { font-size: 1.1rem; font-weight: 600; color: #e94560; }
+        .subtitle { font-size: 0.85rem; color: #888; }
+        .spacer { flex: 1; }
+        a.nav-link {
+            color: #a0c4ff;
+            text-decoration: none;
+            font-size: 0.85rem;
+            padding: 0.4rem 0.75rem;
+            border-radius: 6px;
+            border: 1px solid #1a4f8a;
+        }
+        a.nav-link:hover { background: #1a4f8a; }
+        .panels {
+            flex: 1;
+            display: flex;
+            gap: 1px;
+            background: #0f3460;
+            overflow: hidden;
+        }
+        .panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: #1a1a2e;
+        }
+        .panel-header {
+            padding: 0.6rem 1rem;
+            font-size: 0.85rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            background: #16213e;
+            border-bottom: 1px solid #0f3460;
+        }
+        .panel.es .panel-header { color: #f4a261; }
+        .panel.en .panel-header { color: #4cc9f0; }
+        .panel-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+        }
+        .entry {
+            padding: 0.5rem 0.75rem;
+            border-radius: 4px;
+            line-height: 1.5;
+        }
+        .panel.es .entry { background: rgba(244, 162, 97, 0.08); border-left: 2px solid #f4a261; }
+        .panel.en .entry { background: rgba(76, 201, 240, 0.08); border-left: 2px solid #4cc9f0; }
+        .entry .time {
+            font-size: 0.7rem;
+            color: #666;
+            margin-bottom: 0.15rem;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Transcript</h1>
+        <span class="subtitle">{{ label }}</span>
+        <div class="spacer"></div>
+        <a class="nav-link" href="/history">History</a>
+        <a class="nav-link" href="/captions">Captions</a>
+        <a class="nav-link" href="/">Live</a>
+    </header>
+    {% if has_audio %}
+    <div style="padding: 0.5rem 1rem; background: #16213e; border-bottom: 1px solid #0f3460;">
+        <audio controls style="width: 100%; height: 36px;" src="{{ audio_url }}"></audio>
+    </div>
+    {% endif %}
+    <div class="panels">
+        <div class="panel es">
+            <div class="panel-header">Spanish (Original)</div>
+            <div class="panel-content">
+                {% for e in entries %}
+                <div class="entry">
+                    <div class="time">{{ e.time }}</div>
+                    <div>{{ e.es }}</div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        <div class="panel en">
+            <div class="panel-header">English (Translation)</div>
+            <div class="panel-content">
+                {% for e in entries %}
+                <div class="entry">
+                    <div class="time">{{ e.time }}</div>
+                    <div>{{ e.en }}</div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</body>
+</html>

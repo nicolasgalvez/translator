@@ -1,0 +1,20 @@
+services:
+  translator:
+    build: .
+    ports:
+      - "${TRANSLATOR_PORT:-8765}:${TRANSLATOR_PORT:-8765}"
+    environment:
+      - TRANSLATOR_PORT=${TRANSLATOR_PORT:-8765}
+      - TRANSLATOR_MODEL=${TRANSLATOR_MODEL:-small}
+      - TRANSLATOR_DEVICE=${TRANSLATOR_DEVICE:-default}
+    volumes:
+      - ./transcripts:/app/transcripts
+    devices:
+      - /dev/snd:/dev/snd
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
