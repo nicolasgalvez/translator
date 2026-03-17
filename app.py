@@ -38,8 +38,11 @@ caption_jobs: dict[str, dict] = {}
 
 # Audio config
 SAMPLE_RATE = 48000
-CHUNK_DURATION = 3  # seconds
+CAPTURE_CHUNK = 0.25  # seconds per capture read (small for responsive silence detection)
 SILENCE_THRESHOLD = 0.0005
+MAX_UTTERANCE = 5   # seconds — force transcribe even without a pause
+MIN_UTTERANCE = 0.5 # seconds — don't transcribe tiny fragments
+SILENCE_CHUNKS_TO_SPLIT = 2  # consecutive silent chunks to trigger transcription (0.5 seconds)
 
 # Find audio device index
 device_index = None
@@ -119,14 +122,13 @@ def extract_text(segments) -> str:
 
 
 def audio_capture_loop():
-    """Record audio using a persistent stream. No gaps between chunks."""
-    chunk_frames = SAMPLE_RATE * CHUNK_DURATION
-    print(f"Audio capture started (device {device_index}, {CHUNK_DURATION}s chunks)", flush=True)
+    """Record audio using a persistent stream. Small reads for responsive silence detection."""
+    chunk_frames = int(SAMPLE_RATE * CAPTURE_CHUNK)
+    print(f"Audio capture started (device {device_index}, {CAPTURE_CHUNK}s reads)", flush=True)
     with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
                         device=device_index) as stream:
         while True:
             try:
-                # Blocking read — OS buffers audio while we're not reading
                 audio, overflowed = stream.read(chunk_frames)
                 if overflowed:
                     print("Warning: audio buffer overflowed", flush=True)
@@ -145,26 +147,50 @@ def audio_capture_loop():
 
 
 def audio_process_loop():
-    """Pull chunks from queue and transcribe them."""
-    print(f"Audio processing started", flush=True)
+    """Accumulate audio and transcribe on natural pauses or max duration."""
+    print("Audio processing started (silence-based splitting)", flush=True)
+    utterance_buf = np.zeros(0, dtype=np.float32)
+    silent_count = 0
+    has_speech = False
+
     while True:
-        audio = audio_chunk_queue.get()  # blocks until a chunk is available
+        chunk = audio_chunk_queue.get()
+        utterance_buf = np.concatenate([utterance_buf, chunk])
+        duration = len(utterance_buf) / SAMPLE_RATE
+
+        if is_silent(chunk):
+            silent_count += 1
+        else:
+            silent_count = 0
+            has_speech = True
+
+        # Decide whether to transcribe: silence after speech, or hit max duration
+        should_transcribe = (
+            (has_speech and silent_count >= SILENCE_CHUNKS_TO_SPLIT and duration >= MIN_UTTERANCE)
+            or (has_speech and duration >= MAX_UTTERANCE)
+        )
+
+        if not should_transcribe:
+            continue
+
+        # Grab the utterance and reset
+        audio = utterance_buf.copy()
+        utterance_buf = np.zeros(0, dtype=np.float32)
+        silent_count = 0
+        has_speech = False
 
         try:
-            if is_silent(audio):
-                continue
-
             # Resample 48kHz -> 16kHz for Whisper
             audio_16k = resample_poly(audio, 1, 3).astype(np.float32)
 
-            # Single Whisper pass: transcribe Spanish (greedy, no VAD on short chunks)
+            # Single Whisper pass: transcribe Spanish (greedy)
             es_segments, _ = model.transcribe(
                 audio_16k, task="transcribe", language="es",
                 beam_size=1,
             )
             es_text = extract_text(es_segments)
 
-            # Fast translation via argostranslate (ms instead of seconds)
+            # Fast translation via argostranslate
             if es_text:
                 import argostranslate.translate
                 en_text = argostranslate.translate.translate(es_text, "es", "en")
@@ -177,7 +203,6 @@ def audio_process_loop():
                     "en": en_text,
                     "time": datetime.now().strftime("%H:%M:%S"),
                 }
-                # Auto-save: append to JSONL
                 with open(transcript_file, "a") as f:
                     f.write(json.dumps(entry) + "\n")
                 text_queue.put(entry)
