@@ -20,6 +20,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
 # Config from env vars (set by run.sh) with defaults
+HOST = os.environ.get("TRANSLATOR_HOST", "127.0.0.1")
 PORT = int(os.environ.get("TRANSLATOR_PORT", "8765"))
 MODEL = os.environ.get("TRANSLATOR_MODEL", "small")
 DEVICE_NAME = os.environ.get("TRANSLATOR_DEVICE", "BlackHole 2ch")
@@ -536,4 +537,4 @@ async def captions_download(job_id: str, filename: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    uvicorn.run(app, host=HOST, port=PORT)

@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/.venv"
 
 # Defaults
+HOST=127.0.0.1
 PORT=8765
 MODEL=small
 DEVICE="BlackHole 2ch"
@@ -13,6 +14,7 @@ usage() {
     echo "Usage: $0 [options]"
     echo ""
     echo "Options:"
+    echo "  -H, --host HOST      Bind address (default: 127.0.0.1)"
     echo "  -p, --port PORT      Server port (default: 8765)"
     echo "  -m, --model MODEL    Whisper model: tiny, base, small, medium, large-v3 (default: small)"
     echo "  -d, --device DEVICE  Audio input device name (default: BlackHole 2ch)"
@@ -35,6 +37,7 @@ usage() {
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        -H|--host)   HOST="$2"; shift 2 ;;
         -p|--port)   PORT="$2"; shift 2 ;;
         -m|--model)  MODEL="$2"; shift 2 ;;
         -d|--device) DEVICE="$2"; shift 2 ;;
@@ -55,10 +58,11 @@ else
     source "$VENV_DIR/bin/activate"
 fi
 
+export TRANSLATOR_HOST="$HOST"
 export TRANSLATOR_PORT="$PORT"
 export TRANSLATOR_MODEL="$MODEL"
 export TRANSLATOR_DEVICE="$DEVICE"
 
-echo "Starting translator (port=$PORT, model=$MODEL, device=$DEVICE)"
+echo "Starting translator (host=$HOST, port=$PORT, model=$MODEL, device=$DEVICE)"
 cd "$SCRIPT_DIR"
 python app.py

@@ -59,11 +59,14 @@ If you see `PortAudio` or `sounddevice` errors about device access:
 
 First run creates a virtual environment and installs dependencies. The app runs at **http://localhost:8765**.
 
+> **Note:** The server binds to `127.0.0.1` (localhost only) by default. To allow access from other devices on your network, use `--host 0.0.0.0`.
+
 ### Options
 
 ```
 ./run.sh --model large-v3    # best accuracy (needs more RAM)
 ./run.sh --port 9000         # different port
+./run.sh --host 0.0.0.0     # allow access from other devices on your network
 ./run.sh --device "MacBook Pro Microphone"  # different audio input
 ```
 
