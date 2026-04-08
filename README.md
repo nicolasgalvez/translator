@@ -4,6 +4,10 @@ Real-time Spanish-to-English translator that captures system audio, transcribes 
 
 ## Prerequisites
 
+MacOS only for now, since it relies on BlackHole for audio capture. Linux support is possible with `snd-aloop` but not tested yet.
+
+The dockerized version doesn't work on MacOS due to sound device access issues, but should work on Linux with NVIDIA GPU support for CUDA acceleration.
+
 ### Python 3.10+
 
 ```bash
@@ -35,7 +39,7 @@ The translator captures system audio through [BlackHole](https://existential.aud
    - Right-click the new device → **Use This Device For Sound Output**
 
 3. **Grant microphone access**:
-   - The first time you run the app, macOS will prompt for microphone permission for your terminal (Terminal.app, iTerm2, etc.)
+   - The first time you run the app, macOS will prompt for microphone permission for your terminal (Terminal.app, iTerm2, VS Code, etc.)
    - If you denied it or it didn't prompt: **System Settings → Privacy & Security → Microphone** → toggle on your terminal app
    - You may need to restart your terminal after granting access
 
