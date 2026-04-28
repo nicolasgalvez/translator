@@ -13,17 +13,19 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 from scipy.signal import resample_poly
-from faster_whisper import WhisperModel
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
+
+from transcription import get_backend
 
 # Config from env vars (set by run.sh) with defaults
 HOST = os.environ.get("TRANSLATOR_HOST", "127.0.0.1")
 PORT = int(os.environ.get("TRANSLATOR_PORT", "8765"))
 MODEL = os.environ.get("TRANSLATOR_MODEL", "small")
 DEVICE_NAME = os.environ.get("TRANSLATOR_DEVICE", "BlackHole 2ch")
+BACKEND = os.environ.get("TRANSLATOR_BACKEND", "faster-whisper")
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
@@ -57,23 +59,9 @@ if device_index is None:
 
 print(f"Using audio device: {sd.query_devices(device_index)['name']} (index {device_index})")
 
-# Whisper model — loaded once at startup
-# Auto-detect CUDA, fall back to CPU
-import ctranslate2
-try:
-    if "cuda" in ctranslate2.get_supported_compute_types("cuda"):
-        DEVICE = "cuda"
-        COMPUTE_TYPE = "float16"
-    else:
-        DEVICE = "cpu"
-        COMPUTE_TYPE = "int8"
-except ValueError:
-    DEVICE = "cpu"
-    COMPUTE_TYPE = "int8"
-
-print(f"Loading Whisper model ({MODEL}) on {DEVICE} ({COMPUTE_TYPE})...", flush=True)
-model = WhisperModel(MODEL, device=DEVICE, compute_type=COMPUTE_TYPE)
-print("Model loaded.", flush=True)
+# Transcription backend — loaded once at startup
+backend = get_backend(BACKEND, MODEL)
+print(f"Backend ready: {backend.name}", flush=True)
 
 # Ensure argostranslate es->en is available for live translation
 try:
@@ -118,8 +106,18 @@ def is_silent(audio: np.ndarray) -> bool:
     return np.abs(audio).mean() < SILENCE_THRESHOLD
 
 
+def load_audio_16k(path: Path) -> np.ndarray:
+    """Load a WAV at 16kHz mono float32. The captions pipeline already extracts to this format."""
+    import wave
+    with wave.open(str(path), "rb") as wf:
+        assert wf.getframerate() == 16000, f"Expected 16kHz, got {wf.getframerate()}"
+        assert wf.getnchannels() == 1
+        frames = wf.readframes(wf.getnframes())
+    return np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32767.0
+
+
 def extract_text(segments) -> str:
-    return " ".join(seg.text.strip() for seg in segments if seg.text.strip())
+    return " ".join(seg.text for seg in segments if seg.text)
 
 
 def audio_capture_loop():
@@ -185,10 +183,7 @@ def audio_process_loop():
             audio_16k = resample_poly(audio, 1, 3).astype(np.float32)
 
             # Single Whisper pass: transcribe Spanish (greedy)
-            es_segments, _ = model.transcribe(
-                audio_16k, task="transcribe", language="es",
-                beam_size=1,
-            )
+            es_segments, _ = backend.transcribe(audio_16k, language="es", beam_size=1)
             es_text = extract_text(es_segments)
 
             # Fast translation via argostranslate
@@ -383,26 +378,21 @@ def caption_worker(job_id: str, video_path: Path):
             job.update(status="error", message=f"ffmpeg failed: {result.stderr[:200]}")
             return
 
-        # Step 2: Load audio as numpy for per-segment language detection
+        # Step 2: Load audio as numpy for transcription + per-segment language detection
         job.update(progress=15, message="Loading audio...")
-        from faster_whisper import decode_audio
-        audio_array = decode_audio(str(audio_path), sampling_rate=16000)
+        audio_array = load_audio_16k(audio_path)
 
         # Step 3: Transcribe with Whisper (auto language detection)
         job.update(progress=20, message="Transcribing audio...")
-        segments_raw, info = model.transcribe(
-            str(audio_path), task="transcribe",
-            beam_size=5, vad_filter=True,
+        segments_raw, detected_lang = backend.transcribe(
+            audio_array, beam_size=5, vad_filter=True,
         )
 
         # Collect segments
-        segments = []
-        for seg in segments_raw:
-            segments.append({
-                "start": seg.start,
-                "end": seg.end,
-                "text": seg.text.strip(),
-            })
+        segments = [
+            {"start": seg.start, "end": seg.end, "text": seg.text}
+            for seg in segments_raw
+        ]
         job.update(progress=45, message=f"Transcribed {len(segments)} segments...")
 
         if not segments:
@@ -419,9 +409,9 @@ def caption_worker(job_id: str, video_path: Path):
             # Need at least 0.5s of audio for reliable detection
             if len(audio_slice) < 8000:
                 # Too short — fall back to file-level detection
-                seg["language"] = info.language
+                seg["language"] = detected_lang
             else:
-                lang, prob, _ = model.detect_language(audio=audio_slice)
+                lang, _ = backend.detect_language(audio_slice)
                 seg["language"] = lang
 
             if (i + 1) % 10 == 0:

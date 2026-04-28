@@ -9,6 +9,7 @@ HOST=127.0.0.1
 PORT=8765
 MODEL=small
 DEVICE="BlackHole 2ch"
+BACKEND=faster-whisper
 
 usage() {
     echo "Usage: $0 [options]"
@@ -18,6 +19,7 @@ usage() {
     echo "  -p, --port PORT      Server port (default: 8765)"
     echo "  -m, --model MODEL    Whisper model: tiny, base, small, medium, large-v3 (default: small)"
     echo "  -d, --device DEVICE  Audio input device name (default: BlackHole 2ch)"
+    echo "  -b, --backend NAME   Transcription backend: faster-whisper, mlx-whisper (default: faster-whisper)"
     echo "  -h, --help           Show this help"
     echo ""
     echo "Models (speed vs accuracy):"
@@ -41,6 +43,7 @@ while [[ $# -gt 0 ]]; do
         -p|--port)   PORT="$2"; shift 2 ;;
         -m|--model)  MODEL="$2"; shift 2 ;;
         -d|--device) DEVICE="$2"; shift 2 ;;
+        -b|--backend) BACKEND="$2"; shift 2 ;;
         -h|--help)   usage; exit 0 ;;
         *) echo "Unknown option: $1"; usage; exit 1 ;;
     esac
@@ -52,17 +55,26 @@ if [ ! -d "$VENV_DIR" ]; then
     python3 -m venv "$VENV_DIR"
     source "$VENV_DIR/bin/activate"
     pip install --upgrade pip -q
-    pip install -r "$SCRIPT_DIR/requirements.txt" -q
+    if [ "$BACKEND" = "mlx-whisper" ]; then
+        pip install -r "$SCRIPT_DIR/requirements-mlx.txt" -q
+    else
+        pip install -r "$SCRIPT_DIR/requirements.txt" -q
+    fi
     echo "Setup complete."
 else
     source "$VENV_DIR/bin/activate"
+    if [ "$BACKEND" = "mlx-whisper" ] && ! python -c "import mlx_whisper" 2>/dev/null; then
+        echo "Installing mlx-whisper..."
+        pip install mlx-whisper -q
+    fi
 fi
 
 export TRANSLATOR_HOST="$HOST"
 export TRANSLATOR_PORT="$PORT"
 export TRANSLATOR_MODEL="$MODEL"
 export TRANSLATOR_DEVICE="$DEVICE"
+export TRANSLATOR_BACKEND="$BACKEND"
 
-echo "Starting translator (host=$HOST, port=$PORT, model=$MODEL, device=$DEVICE)"
+echo "Starting translator (host=$HOST, port=$PORT, model=$MODEL, device=$DEVICE, backend=$BACKEND)"
 cd "$SCRIPT_DIR"
 python app.py
