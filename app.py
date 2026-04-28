@@ -106,6 +106,26 @@ def is_silent(audio: np.ndarray) -> bool:
     return np.abs(audio).mean() < SILENCE_THRESHOLD
 
 
+def find_quietest_cut(audio: np.ndarray, lookback_seconds: float = 1.0,
+                      window_seconds: float = 0.05) -> int:
+    """Return a sample index near the end of `audio` where amplitude is lowest.
+
+    Used when we hit MAX_UTTERANCE without natural silence — we cut at the
+    quietest spot in the last `lookback_seconds` instead of slicing mid-word.
+    """
+    win = int(SAMPLE_RATE * window_seconds)
+    lookback = int(SAMPLE_RATE * lookback_seconds)
+    region = audio[-lookback:]
+    if len(region) < win * 2:
+        return len(audio)
+    # Mean amplitude in non-overlapping windows
+    n_windows = len(region) // win
+    trimmed = region[: n_windows * win].reshape(n_windows, win)
+    energies = np.abs(trimmed).mean(axis=1)
+    quietest = int(np.argmin(energies))
+    return len(audio) - lookback + quietest * win + win  # cut at end of quietest window
+
+
 def load_audio_16k(path: Path) -> np.ndarray:
     """Load a WAV at 16kHz mono float32. The captions pipeline already extracts to this format."""
     import wave
@@ -163,20 +183,27 @@ def audio_process_loop():
             silent_count = 0
             has_speech = True
 
-        # Decide whether to transcribe: silence after speech, or hit max duration
-        should_transcribe = (
-            (has_speech and silent_count >= SILENCE_CHUNKS_TO_SPLIT and duration >= MIN_UTTERANCE)
-            or (has_speech and duration >= MAX_UTTERANCE)
+        natural_break = (
+            has_speech and silent_count >= SILENCE_CHUNKS_TO_SPLIT and duration >= MIN_UTTERANCE
         )
+        forced_break = has_speech and duration >= MAX_UTTERANCE
 
-        if not should_transcribe:
+        if not (natural_break or forced_break):
             continue
 
-        # Grab the utterance and reset
-        audio = utterance_buf.copy()
-        utterance_buf = np.zeros(0, dtype=np.float32)
-        silent_count = 0
-        has_speech = False
+        if forced_break and not natural_break:
+            # No silence found — find the quietest spot in the last ~1s and cut there
+            # so we don't slice mid-word. The trailing audio carries forward.
+            cut = find_quietest_cut(utterance_buf, lookback_seconds=1.0)
+            audio = utterance_buf[:cut].copy()
+            utterance_buf = utterance_buf[cut:].copy()
+            # Don't reset has_speech — there's still speech in the carried tail
+            silent_count = 0
+        else:
+            audio = utterance_buf.copy()
+            utterance_buf = np.zeros(0, dtype=np.float32)
+            silent_count = 0
+            has_speech = False
 
         try:
             # Resample 48kHz -> 16kHz for Whisper
