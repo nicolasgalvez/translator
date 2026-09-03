@@ -1,12 +1,10 @@
-# Bilingual Live Translator
+# Live Transcriber
 
-Real-time Spanish-to-English translator that captures system audio, transcribes with Whisper, and translates via argostranslate. Includes transcript history with audio playback and a video captions tool that generates dual SRT subtitle files.
+Real-time transcription app that captures system audio, transcribes with Whisper, saves live transcript sessions, and exposes backend/frontend plugin hooks for reacting to transcript events. The live UI is a React/Tailwind app with a resizable transcript pane and a main plugin-output pane.
+
+The existing video captions tool is still available at `/captions`.
 
 ## Prerequisites
-
-MacOS only for now, since it relies on BlackHole for audio capture. Linux support is possible with `snd-aloop` but not tested yet.
-
-The dockerized version doesn't work on MacOS due to sound device access issues, but should work on Linux with NVIDIA GPU support for CUDA acceleration.
 
 ### Python 3.10+
 
@@ -14,42 +12,33 @@ The dockerized version doesn't work on MacOS due to sound device access issues, 
 python3 --version
 ```
 
+### Node.js 20+
+
+Required to install and build the React frontend.
+
+```bash
+node --version
+npm --version
+```
+
 ### ffmpeg
 
 Required for the video captions feature.
 
 ```bash
-# macOS
 brew install ffmpeg
 ```
 
-### BlackHole (virtual audio device)
+### BlackHole on macOS
 
-The translator captures system audio through [BlackHole](https://existential.audio/blackhole/), a virtual audio loopback driver.
+The transcriber captures system audio through [BlackHole](https://existential.audio/blackhole/), a virtual audio loopback driver.
 
-1. **Install BlackHole 2ch**:
+1. Install BlackHole 2ch:
    ```bash
    brew install blackhole-2ch
    ```
-
-2. **Create a Multi-Output Device** (so you hear audio AND it gets captured):
-   - Open **Audio MIDI Setup** (Spotlight → "Audio MIDI Setup")
-   - Click **+** in the bottom left → **Create Multi-Output Device**
-   - Check both your speakers/headphones AND **BlackHole 2ch**
-   - Right-click the new device → **Use This Device For Sound Output**
-
-3. **Grant microphone access**:
-   - The first time you run the app, macOS will prompt for microphone permission for your terminal (Terminal.app, iTerm2, VS Code, etc.)
-   - If you denied it or it didn't prompt: **System Settings → Privacy & Security → Microphone** → toggle on your terminal app
-   - You may need to restart your terminal after granting access
-
-### macOS Security Settings
-
-If you see `PortAudio` or `sounddevice` errors about device access:
-
-- **System Settings → Privacy & Security → Microphone** — ensure your terminal is listed and enabled
-- **System Settings → Privacy & Security → Input Monitoring** — add your terminal if audio capture still fails
-- After changing permissions, **restart your terminal**
+2. Create a Multi-Output Device in Audio MIDI Setup so you can hear audio and capture it through BlackHole.
+3. Grant microphone access to your terminal app in System Settings.
 
 ## Quick Start
 
@@ -57,46 +46,74 @@ If you see `PortAudio` or `sounddevice` errors about device access:
 ./run.sh
 ```
 
-First run creates a virtual environment and installs dependencies. The app runs at **http://localhost:8765**.
+First run creates a Python virtual environment, installs Python dependencies, installs frontend dependencies, builds the React app, and starts FastAPI at `http://localhost:8765`.
 
-> **Note:** The server binds to `127.0.0.1` (localhost only) by default. To allow access from other devices on your network, use `--host 0.0.0.0`.
+### Frontend Dev Server
+
+```bash
+./run.sh --frontend-dev
+```
+
+This starts Vite at `http://127.0.0.1:5173` and FastAPI at `http://localhost:8765`.
 
 ### Options
 
-```
-./run.sh --model large-v3    # best accuracy (needs more RAM)
-./run.sh --port 9000         # different port
-./run.sh --host 0.0.0.0     # allow access from other devices on your network
-./run.sh --device "MacBook Pro Microphone"  # different audio input
+```bash
+./run.sh --model large-v3
+./run.sh --port 9000
+./run.sh --host 0.0.0.0
+./run.sh --device "MacBook Pro Microphone"
+./run.sh --backend mlx-whisper
+./run.sh --skip-frontend-build
 ```
 
-### Whisper Models
+## Plugin Hooks
 
-| Model | Speed | RAM | Notes |
-|-------|-------|-----|-------|
-| `tiny` | Fastest | ~1GB | Low accuracy |
-| `base` | Fast | ~1GB | Decent |
-| `small` | Balanced | ~2GB | Default |
-| `medium` | Slower | ~5GB | Better accuracy |
-| `large-v3` | Slowest | ~10GB | Best accuracy, needs GPU for real-time |
+Backend plugins live in `plugins/` as either `plugins/name.py` or `plugins/name/__init__.py`. Importing a plugin should register hooks from `hooks.py`.
+
+```python
+from hooks import add_filter
+
+
+def uppercase(event, context):
+    event = event.copy()
+    event["text"] = event["text"].upper()
+    return event
+
+
+add_filter("transcript.before_save", uppercase)
+```
+
+Available backend hooks:
+
+- `transcript.before_save`
+- `transcript.before_render`
+- `transcript.after_save`
+- `transcript.after_render`
+
+Transcript events include:
+
+- `id`
+- `text`
+- `time`
+- optional `metadata`
+- optional `render`
+
+Frontend plugins register transcript filters and main-pane renderers through `frontend/src/plugins/registry.tsx`. The included `highlightKeyword` plugin highlights the word `important` and renders matching transcript events in the main pane.
 
 ## Features
 
-### Live Translator (`/`)
+### Live Transcriber (`/`)
 
-Captures system audio in real-time, transcribes Spanish, and shows the English translation side-by-side. Uses silence-based chunking to capture complete utterances without cutting words at boundaries.
+Captures system audio in real time, transcribes Spanish with Whisper, saves transcript JSONL entries, and broadcasts transcript events to the React UI.
 
 ### Transcript History (`/history`)
 
-Browse past sessions. Each session saves a `.jsonl` transcript and a `.wav` audio recording. Click into any session to view the transcript with an audio player.
+Browse saved transcript sessions. Each session saves a `.jsonl` transcript and a `.wav` audio recording.
 
 ### Video Captions (`/captions`)
 
-Upload a video file to generate dual subtitle files:
-- `{name}.original.srt` — subtitles in the spoken language (as-is)
-- `{name}.translated.srt` — subtitles translated to the other language
-
-Supports mixed Spanish/English audio with per-segment language detection.
+Upload a video or audio file to generate subtitle files. This workflow is preserved from the previous app.
 
 ## Docker
 
@@ -109,8 +126,16 @@ Requires NVIDIA GPU runtime for CUDA acceleration. Falls back to CPU if unavaila
 ## Running Tests
 
 ```bash
+python -m unittest discover -s tests -p 'test_hooks.py'
+python -m unittest discover -s tests -p 'test_transcript_events.py'
+
+cd frontend
+npm test
+```
+
+The existing chunking test still verifies silence-based audio splitting against a real fixture:
+
+```bash
 source .venv/bin/activate
 python tests/test_chunking.py
 ```
-
-The chunking test verifies that the silence-based audio splitting captures complete utterances from a Spanish conversation without dropping words.
