@@ -1,5 +1,5 @@
 services:
-  translator:
+  transcriber:
     build: .
     ports:
       - "${TRANSLATOR_PORT:-8765}:${TRANSLATOR_PORT:-8765}"
