@@ -3,130 +3,125 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Live Translator</title>
+    <title>Live Transcriber</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-            background: #1a1a2e;
-            color: #e0e0e0;
+            background: #171b22;
+            color: #f3f4f6;
             height: 100vh;
             display: flex;
             flex-direction: column;
         }
         header {
-            padding: 0.75rem 1.5rem;
-            background: #16213e;
-            border-bottom: 1px solid #0f3460;
+            height: 56px;
+            padding: 0 1rem;
+            border-bottom: 1px solid #343b47;
             display: flex;
             align-items: center;
             gap: 1rem;
         }
-        header h1 { font-size: 1.1rem; font-weight: 600; color: #e94560; }
+        header h1 { font-size: 0.95rem; font-weight: 650; color: #f6a33d; }
         .status {
-            font-size: 0.8rem;
-            padding: 0.2rem 0.6rem;
-            border-radius: 999px;
+            font-size: 0.75rem;
+            padding: 0.2rem 0.5rem;
+            border-radius: 6px;
+            background: #262d38;
+            color: #aab2bf;
         }
-        .status.connected { background: #1b4332; color: #95d5b2; }
-        .status.disconnected { background: #5c1a1a; color: #f4a0a0; }
+        .status.connected { color: #5fc4b8; }
         .spacer { flex: 1; }
         a.nav-link {
-            color: #a0c4ff;
+            color: #aab2bf;
             text-decoration: none;
             font-size: 0.85rem;
-            padding: 0.4rem 0.75rem;
+            padding: 0.35rem 0.65rem;
             border-radius: 6px;
-            border: 1px solid #1a4f8a;
+            border: 1px solid #343b47;
         }
-        a.nav-link:hover { background: #1a4f8a; }
-        .panels {
+        .layout {
             flex: 1;
-            display: flex;
-            gap: 1px;
-            background: #0f3460;
-            overflow: hidden;
+            display: grid;
+            grid-template-columns: minmax(260px, 1fr) 2fr;
+            min-height: 0;
         }
-        .panel {
-            flex: 1;
+        .transcript {
+            border-right: 1px solid #343b47;
+            background: rgba(38, 45, 56, 0.45);
+            min-width: 0;
             display: flex;
             flex-direction: column;
-            background: #1a1a2e;
+        }
+        .main {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
         }
         .panel-header {
-            padding: 0.6rem 1rem;
-            font-size: 0.85rem;
-            font-weight: 600;
+            padding: 0.8rem 1rem;
+            border-bottom: 1px solid #343b47;
+            color: #5fc4b8;
+            font-size: 0.75rem;
+            font-weight: 700;
             text-transform: uppercase;
-            letter-spacing: 0.05em;
-            background: #16213e;
-            border-bottom: 1px solid #0f3460;
         }
-        .panel.es .panel-header { color: #f4a261; }
-        .panel.en .panel-header { color: #4cc9f0; }
         .panel-content {
             flex: 1;
             overflow-y: auto;
             padding: 1rem;
             display: flex;
             flex-direction: column;
-            gap: 0.4rem;
+            gap: 0.75rem;
         }
         .entry {
-            padding: 0.5rem 0.75rem;
-            border-radius: 4px;
+            padding: 0.75rem;
+            border-radius: 6px;
             line-height: 1.5;
-            animation: fadeIn 0.3s ease;
+            background: #171b22;
+            border: 1px solid #343b47;
         }
-        .panel.es .entry { background: rgba(244, 162, 97, 0.08); border-left: 2px solid #f4a261; }
-        .panel.en .entry { background: rgba(76, 201, 240, 0.08); border-left: 2px solid #4cc9f0; }
         .entry .time {
             font-size: 0.7rem;
-            color: #666;
-            margin-bottom: 0.15rem;
+            color: #aab2bf;
+            margin-bottom: 0.25rem;
         }
         .empty-state {
             text-align: center;
-            color: #444;
+            color: #aab2bf;
             margin-top: 3rem;
             font-size: 0.95rem;
-        }
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(6px); }
-            to { opacity: 1; transform: translateY(0); }
         }
     </style>
 </head>
 <body>
     <header>
-        <h1>Live Translator</h1>
-        <span class="status disconnected" id="status">Disconnected</span>
+        <h1>Live Transcriber</h1>
+        <span class="status" id="status">Disconnected</span>
         <div class="spacer"></div>
-        <a class="nav-link" href="/captions">Captions</a>
         <a class="nav-link" href="/history">History</a>
     </header>
-    <div class="panels">
-        <div class="panel es">
-            <div class="panel-header">Spanish (Original)</div>
-            <div class="panel-content" id="es-panel">
-                <div class="empty-state" id="es-empty">Waiting for audio...</div>
+    <div class="layout">
+        <aside class="transcript">
+            <div class="panel-header">Live Transcript</div>
+            <div class="panel-content" id="transcript-panel">
+                <div class="empty-state" id="empty">Waiting for audio...</div>
             </div>
-        </div>
-        <div class="panel en">
-            <div class="panel-header">English (Translation)</div>
-            <div class="panel-content" id="en-panel">
-                <div class="empty-state" id="en-empty">Waiting for audio...</div>
+        </aside>
+        <main class="main">
+            <div class="panel-header">Plugin Output</div>
+            <div class="panel-content">
+                <div class="empty-state">Build the React frontend to enable plugin output.</div>
             </div>
-        </div>
+        </main>
     </div>
 
     <script>
-        const esPanel = document.getElementById('es-panel');
-        const enPanel = document.getElementById('en-panel');
+        const panel = document.getElementById('transcript-panel');
         const status = document.getElementById('status');
 
-        function addEntry(panel, emptyId, text, time) {
-            const empty = document.getElementById(emptyId);
+        function addEntry(event) {
+            const empty = document.getElementById('empty');
             if (empty) empty.remove();
 
             const div = document.createElement('div');
@@ -134,10 +129,10 @@
 
             const ts = document.createElement('div');
             ts.className = 'time';
-            ts.textContent = time;
+            ts.textContent = event.time;
 
             const content = document.createElement('div');
-            content.textContent = text;
+            content.textContent = event.text;
 
             div.appendChild(ts);
             div.appendChild(content);
@@ -155,13 +150,12 @@
             };
             ws.onclose = () => {
                 status.textContent = 'Disconnected';
-                status.className = 'status disconnected';
+                status.className = 'status';
                 setTimeout(connect, 2000);
             };
-            ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                if (data.es) addEntry(esPanel, 'es-empty', data.es, data.time);
-                if (data.en) addEntry(enPanel, 'en-empty', data.en, data.time);
+            ws.onmessage = (message) => {
+                const data = JSON.parse(message.data);
+                if (data.type === 'transcript') addEntry(data.event);
             };
         }
 
