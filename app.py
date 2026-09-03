@@ -14,6 +14,7 @@ import sounddevice as sd
 from scipy.signal import resample_poly
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
@@ -30,6 +31,10 @@ BACKEND = os.environ.get("TRANSLATOR_BACKEND", "faster-whisper")
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
+FRONTEND_DIST = Path("frontend/dist")
+
+if (FRONTEND_DIST / "assets").exists():
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
 
 TRANSCRIPTS_DIR = Path("transcripts")
 TRANSCRIPTS_DIR.mkdir(exist_ok=True)
@@ -251,6 +256,9 @@ async def broadcast_loop():
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
+    index_file = FRONTEND_DIST / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
     return templates.TemplateResponse("index.html", {"request": request})
 
 
