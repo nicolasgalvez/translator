@@ -4,7 +4,10 @@ transcripts/
 captions/
 __pycache__/
 *.pyc
+frontend/node_modules/
+frontend/dist/
 
 # OS files
 .DS_Store
 Thumbs.db
+.claude/worktrees
