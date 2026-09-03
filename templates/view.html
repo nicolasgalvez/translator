@@ -86,7 +86,6 @@
         <span class="subtitle">{{ label }}</span>
         <div class="spacer"></div>
         <a class="nav-link" href="/history">History</a>
-        <a class="nav-link" href="/captions">Captions</a>
         <a class="nav-link" href="/">Live</a>
     </header>
     {% if has_audio %}
@@ -96,23 +95,12 @@
     {% endif %}
     <div class="panels">
         <div class="panel es">
-            <div class="panel-header">Spanish (Original)</div>
+            <div class="panel-header">Transcript</div>
             <div class="panel-content">
                 {% for e in entries %}
                 <div class="entry">
                     <div class="time">{{ e.time }}</div>
-                    <div>{{ e.es }}</div>
-                </div>
-                {% endfor %}
-            </div>
-        </div>
-        <div class="panel en">
-            <div class="panel-header">English (Translation)</div>
-            <div class="panel-content">
-                {% for e in entries %}
-                <div class="entry">
-                    <div class="time">{{ e.time }}</div>
-                    <div>{{ e.en }}</div>
+                    <div>{{ e.text if e.text is defined else e.es }}</div>
                 </div>
                 {% endfor %}
             </div>

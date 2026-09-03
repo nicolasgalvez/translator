@@ -17,6 +17,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
+from plugin_loader import load_plugins
+from transcript_events import process_transcript_text, queue_transcript_render_event
 from transcription import get_backend
 
 # Config from env vars (set by run.sh) with defaults
@@ -61,34 +63,6 @@ print(f"Using audio device: {sd.query_devices(device_index)['name']} (index {dev
 # Transcription backend — loaded once at startup
 backend = get_backend(BACKEND, MODEL)
 print(f"Backend ready: {backend.name}", flush=True)
-
-
-def ensure_live_translation_model() -> None:
-    """Install the es->en argostranslate model if it isn't already present."""
-    # Imported here, not at the top, so a missing or broken argostranslate
-    # degrades to the warning below instead of failing startup outright.
-    import argostranslate.package  # pylint: disable=import-outside-toplevel
-
-    installed_pairs = {
-        (pkg.from_code, pkg.to_code)
-        for pkg in argostranslate.package.get_installed_packages()
-    }
-    if ("es", "en") in installed_pairs:
-        return
-    print("Installing es->en translation model...", flush=True)
-    argostranslate.package.update_package_index()
-    for pkg in argostranslate.package.get_available_packages():
-        if pkg.from_code == "es" and pkg.to_code == "en":
-            pkg.install()
-            break
-    print("Translation model ready.", flush=True)
-
-
-try:
-    ensure_live_translation_model()
-# Live translation is a nice-to-have; transcription still works without it.
-except Exception as e:  # pylint: disable=broad-exception-caught
-    print(f"Warning: argostranslate setup failed: {e}", flush=True)
 
 # Auto-save: one JSONL file per session, append each segment
 session_start = datetime.now()
@@ -174,37 +148,6 @@ def audio_capture_loop():
                 print(f"Audio capture error: {e}", flush=True)
 
 
-def translate_to_english(es_text: str) -> str:
-    """Translate Spanish to English. See ensure_live_translation_model for the lazy import."""
-    import argostranslate.translate  # pylint: disable=import-outside-toplevel
-
-    return argostranslate.translate.translate(es_text, "es", "en")
-
-
-def transcribe_and_publish(audio: np.ndarray) -> None:
-    """Transcribe one utterance, translate it, append it to the transcript, and queue it."""
-    # Resample 48kHz -> 16kHz for Whisper
-    audio_16k = resample_poly(audio, 1, 3).astype(np.float32)
-
-    # Single Whisper pass: transcribe Spanish (greedy)
-    es_segments, _ = backend.transcribe(audio_16k, language="es", beam_size=1)
-    es_text = extract_text(es_segments)
-
-    # Fast translation via argostranslate
-    en_text = translate_to_english(es_text) if es_text else ""
-    if not (es_text or en_text):
-        return
-
-    entry = {
-        "es": es_text,
-        "en": en_text,
-        "time": datetime.now().strftime("%H:%M:%S"),
-    }
-    with open(transcript_file, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry) + "\n")
-    text_queue.put(entry)
-
-
 def audio_process_loop():
     """Accumulate audio and transcribe on natural pauses or max duration."""
     print("Audio processing started (silence-based splitting)", flush=True)
@@ -246,7 +189,24 @@ def audio_process_loop():
             has_speech = False
 
         try:
-            transcribe_and_publish(audio)
+            # Resample 48kHz -> 16kHz for Whisper
+            audio_16k = resample_poly(audio, 1, 3).astype(np.float32)
+
+            # Single Whisper pass: transcribe Spanish (greedy).
+            segments, _ = backend.transcribe(audio_16k, language="es", beam_size=1)
+            text = extract_text(segments)
+            entry = process_transcript_text(
+                text,
+                transcript_file,
+                context={"backend": backend.name, "model": MODEL},
+            )
+            if entry:
+                queue_transcript_render_event(
+                    entry,
+                    text_queue,
+                    context={"backend": backend.name, "model": MODEL},
+                )
+
         # One bad utterance must not end the processing thread.
         except Exception as e:  # pylint: disable=broad-exception-caught
             print(f"Transcription error: {e}", flush=True)
@@ -258,6 +218,9 @@ clients: list[WebSocket] = []
 
 @app.on_event("startup")
 async def startup():
+    loaded_plugins = load_plugins()
+    if loaded_plugins:
+        print(f"Loaded plugins: {', '.join(loaded_plugins)}", flush=True)
     # Capture thread: records audio continuously via sd.rec()
     capture = threading.Thread(target=audio_capture_loop, daemon=True)
     capture.start()
@@ -271,7 +234,7 @@ async def broadcast_loop():
     while True:
         try:
             entry = text_queue.get_nowait()
-            msg = json.dumps(entry)
+            msg = json.dumps({"type": "transcript", "event": entry})
             disconnected = []
             for ws in clients:
                 try:
@@ -440,7 +403,7 @@ def label_segment_languages(segments: list[dict], audio_array: np.ndarray,
 
 def build_srt_entries(segments: list[dict], job: dict) -> tuple[list[dict], list[dict]]:
     """Return (as-spoken entries, translated entries), each segment flipped es<->en."""
-    # See ensure_live_translation_model for why argostranslate stays a lazy import.
+    # Lazy import: argostranslate is only needed by the captions pipeline.
     import argostranslate.translate  # pylint: disable=import-outside-toplevel
 
     original_entries = []
