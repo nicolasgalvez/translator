@@ -21,9 +21,11 @@ class MlxWhisperBackend(TranscriptionBackend):
     name = "mlx-whisper"
 
     def __init__(self, model_size: str):
-        # Imported here so an ImportError surfaces when this backend is chosen,
-        # not when the package is loaded — mlx-whisper is Apple Silicon only.
-        import mlx_whisper as mw
+        # mlx-whisper ships only for Apple Silicon: imported here so the failure
+        # surfaces when this backend is chosen rather than when the package is
+        # loaded, and disabled for pylint because it is absent on the Linux runner
+        # (it lives in requirements-mlx.txt, not requirements.txt).
+        import mlx_whisper as mw  # pylint: disable=import-error
 
         self._mw = mw
         self._repo = MLX_MODEL_MAP.get(model_size, model_size)
