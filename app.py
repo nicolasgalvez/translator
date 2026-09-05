@@ -46,38 +46,48 @@ MAX_UTTERANCE = 5   # seconds — force transcribe even without a pause
 MIN_UTTERANCE = 0.5 # seconds — don't transcribe tiny fragments
 SILENCE_CHUNKS_TO_SPLIT = 2  # consecutive silent chunks to trigger transcription (0.5 seconds)
 
-# Find audio device index
-device_index = None
-for i, dev in enumerate(sd.query_devices()):
-    if DEVICE_NAME in dev["name"] and dev["max_input_channels"] >= 2:
-        device_index = i
-        break
 
-if device_index is None:
-    raise RuntimeError(f"Could not find '{DEVICE_NAME}' input device")
+def find_input_device(name: str) -> int:
+    """Return the index of the first stereo-capable input device matching `name`."""
+    for idx, device in enumerate(sd.query_devices()):
+        if name in device["name"] and device["max_input_channels"] >= 2:
+            return idx
+    raise RuntimeError(f"Could not find '{name}' input device")
 
+
+device_index = find_input_device(DEVICE_NAME)
 print(f"Using audio device: {sd.query_devices(device_index)['name']} (index {device_index})")
 
 # Transcription backend — loaded once at startup
 backend = get_backend(BACKEND, MODEL)
 print(f"Backend ready: {backend.name}", flush=True)
 
-# Ensure argostranslate es->en is available for live translation
-try:
-    import argostranslate.package
+
+def ensure_live_translation_model() -> None:
+    """Install the es->en argostranslate model if it isn't already present."""
+    # Imported here, not at the top, so a missing or broken argostranslate
+    # degrades to the warning below instead of failing startup outright.
+    import argostranslate.package  # pylint: disable=import-outside-toplevel
+
     installed_pairs = {
-        (p.from_code, p.to_code)
-        for p in argostranslate.package.get_installed_packages()
+        (pkg.from_code, pkg.to_code)
+        for pkg in argostranslate.package.get_installed_packages()
     }
-    if ("es", "en") not in installed_pairs:
-        print("Installing es->en translation model...", flush=True)
-        argostranslate.package.update_package_index()
-        for pkg in argostranslate.package.get_available_packages():
-            if pkg.from_code == "es" and pkg.to_code == "en":
-                pkg.install()
-                break
-        print("Translation model ready.", flush=True)
-except Exception as e:
+    if ("es", "en") in installed_pairs:
+        return
+    print("Installing es->en translation model...", flush=True)
+    argostranslate.package.update_package_index()
+    for pkg in argostranslate.package.get_available_packages():
+        if pkg.from_code == "es" and pkg.to_code == "en":
+            pkg.install()
+            break
+    print("Translation model ready.", flush=True)
+
+
+try:
+    ensure_live_translation_model()
+# Live translation is a nice-to-have; transcription still works without it.
+except Exception as e:  # pylint: disable=broad-exception-caught
     print(f"Warning: argostranslate setup failed: {e}", flush=True)
 
 # Auto-save: one JSONL file per session, append each segment
@@ -159,8 +169,40 @@ def audio_capture_loop():
                 # Hand off to processing thread
                 audio_chunk_queue.put(audio)
 
-            except Exception as e:
+            # A dropped read must not end the capture thread.
+            except Exception as e:  # pylint: disable=broad-exception-caught
                 print(f"Audio capture error: {e}", flush=True)
+
+
+def translate_to_english(es_text: str) -> str:
+    """Translate Spanish to English. See ensure_live_translation_model for the lazy import."""
+    import argostranslate.translate  # pylint: disable=import-outside-toplevel
+
+    return argostranslate.translate.translate(es_text, "es", "en")
+
+
+def transcribe_and_publish(audio: np.ndarray) -> None:
+    """Transcribe one utterance, translate it, append it to the transcript, and queue it."""
+    # Resample 48kHz -> 16kHz for Whisper
+    audio_16k = resample_poly(audio, 1, 3).astype(np.float32)
+
+    # Single Whisper pass: transcribe Spanish (greedy)
+    es_segments, _ = backend.transcribe(audio_16k, language="es", beam_size=1)
+    es_text = extract_text(es_segments)
+
+    # Fast translation via argostranslate
+    en_text = translate_to_english(es_text) if es_text else ""
+    if not (es_text or en_text):
+        return
+
+    entry = {
+        "es": es_text,
+        "en": en_text,
+        "time": datetime.now().strftime("%H:%M:%S"),
+    }
+    with open(transcript_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+    text_queue.put(entry)
 
 
 def audio_process_loop():
@@ -204,31 +246,9 @@ def audio_process_loop():
             has_speech = False
 
         try:
-            # Resample 48kHz -> 16kHz for Whisper
-            audio_16k = resample_poly(audio, 1, 3).astype(np.float32)
-
-            # Single Whisper pass: transcribe Spanish (greedy)
-            es_segments, _ = backend.transcribe(audio_16k, language="es", beam_size=1)
-            es_text = extract_text(es_segments)
-
-            # Fast translation via argostranslate
-            if es_text:
-                import argostranslate.translate
-                en_text = argostranslate.translate.translate(es_text, "es", "en")
-            else:
-                en_text = ""
-
-            if es_text or en_text:
-                entry = {
-                    "es": es_text,
-                    "en": en_text,
-                    "time": datetime.now().strftime("%H:%M:%S"),
-                }
-                with open(transcript_file, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(entry) + "\n")
-                text_queue.put(entry)
-
-        except Exception as e:
+            transcribe_and_publish(audio)
+        # One bad utterance must not end the processing thread.
+        except Exception as e:  # pylint: disable=broad-exception-caught
             print(f"Transcription error: {e}", flush=True)
 
 
@@ -256,7 +276,8 @@ async def broadcast_loop():
             for ws in clients:
                 try:
                     await ws.send_text(msg)
-                except Exception:
+                # Any send failure means the socket is gone.
+                except Exception:  # pylint: disable=broad-exception-caught
                     disconnected.append(ws)
             for ws in disconnected:
                 clients.remove(ws)
@@ -364,8 +385,7 @@ def write_srt(path: Path, entries: list[dict]):
 
 def ensure_argos_packages(job: dict):
     """Install argostranslate language packages if not already present."""
-    import argostranslate.package
-    import argostranslate.translate
+    import argostranslate.package  # pylint: disable=import-outside-toplevel
 
     installed = argostranslate.package.get_installed_packages()
     installed_pairs = {(p.from_code, p.to_code) for p in installed}
@@ -385,6 +405,99 @@ def ensure_argos_packages(job: dict):
                 pkg.install()
 
 
+def extract_audio_16k(video_path: Path, audio_path: Path) -> str | None:
+    """Extract mono 16kHz WAV from a video. Returns an error message, or None on success."""
+    result = subprocess.run(
+        ["ffmpeg", "-i", str(video_path), "-vn", "-acodec", "pcm_s16le",
+         "-ar", "16000", "-ac", "1", str(audio_path), "-y"],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        return f"ffmpeg failed: {result.stderr[:200]}"
+    return None
+
+
+def label_segment_languages(segments: list[dict], audio_array: np.ndarray,
+                            detected_lang: str, job: dict) -> None:
+    """Set each segment's "language" by detecting on that segment's own audio slice."""
+    for i, seg in enumerate(segments):
+        start_sample = int(seg["start"] * 16000)
+        end_sample = int(seg["end"] * 16000)
+        audio_slice = audio_array[start_sample:end_sample]
+
+        # Need at least 0.5s of audio for reliable detection
+        if len(audio_slice) < 8000:
+            # Too short — fall back to file-level detection
+            seg["language"] = detected_lang
+        else:
+            lang, _ = backend.detect_language(audio_slice)
+            seg["language"] = lang
+
+        if (i + 1) % 10 == 0:
+            pct = 50 + int(15 * (i + 1) / len(segments))
+            job.update(progress=pct, message=f"Detecting language... ({i+1}/{len(segments)})")
+
+
+def build_srt_entries(segments: list[dict], job: dict) -> tuple[list[dict], list[dict]]:
+    """Return (as-spoken entries, translated entries), each segment flipped es<->en."""
+    # See ensure_live_translation_model for why argostranslate stays a lazy import.
+    import argostranslate.translate  # pylint: disable=import-outside-toplevel
+
+    original_entries = []
+    translated_entries = []
+
+    for i, seg in enumerate(segments):
+        original_entries.append({
+            "start": seg["start"], "end": seg["end"], "text": seg["text"],
+        })
+
+        if seg["language"] == "es":
+            # Spanish segment → translate to English
+            text = argostranslate.translate.translate(seg["text"], "es", "en")
+        else:
+            # English (or other) segment → translate to Spanish
+            text = argostranslate.translate.translate(seg["text"], "en", "es")
+        translated_entries.append({
+            "start": seg["start"], "end": seg["end"], "text": text,
+        })
+
+        if (i + 1) % 10 == 0:
+            pct = 70 + int(20 * (i + 1) / len(segments))
+            job.update(progress=pct, message=f"Translating... ({i+1}/{len(segments)})")
+
+    return original_entries, translated_entries
+
+
+def transcribe_segments(audio_array: np.ndarray, job: dict) -> tuple[list[dict], str]:
+    """Transcribe a whole file. Returns (segment dicts, file-level detected language)."""
+    segments_raw, detected_lang = backend.transcribe(
+        audio_array, beam_size=5, vad_filter=True,
+    )
+    segments = [
+        {"start": seg.start, "end": seg.end, "text": seg.text}
+        for seg in segments_raw
+    ]
+    job.update(progress=45, message=f"Transcribed {len(segments)} segments...")
+    return segments, detected_lang
+
+
+def language_summary(segments: list[dict]) -> str:
+    """Describe the language mix, e.g. "12 Spanish, 3 English"."""
+    es_count = sum(1 for s in segments if s["language"] == "es")
+    en_count = sum(1 for s in segments if s["language"] == "en")
+    return f"{es_count} Spanish, {en_count} English"
+
+
+def write_caption_files(job_dir: Path, stem: str, original_entries: list[dict],
+                        translated_entries: list[dict]) -> list[str]:
+    """Write both SRTs into the job directory and return their filenames."""
+    original_srt = job_dir / f"{stem}.original.srt"
+    translated_srt = job_dir / f"{stem}.translated.srt"
+    write_srt(original_srt, original_entries)
+    write_srt(translated_srt, translated_entries)
+    return [original_srt.name, translated_srt.name]
+
+
 def caption_worker(job_id: str, video_path: Path):
     job = caption_jobs[job_id]
     stem = video_path.stem
@@ -394,13 +507,9 @@ def caption_worker(job_id: str, video_path: Path):
         # Step 1: Extract audio with ffmpeg
         job.update(status="processing", progress=10, message="Extracting audio...")
         audio_path = job_dir / "audio.wav"
-        result = subprocess.run(
-            ["ffmpeg", "-i", str(video_path), "-vn", "-acodec", "pcm_s16le",
-             "-ar", "16000", "-ac", "1", str(audio_path), "-y"],
-            capture_output=True, text=True, check=False,
-        )
-        if result.returncode != 0:
-            job.update(status="error", message=f"ffmpeg failed: {result.stderr[:200]}")
+        error = extract_audio_16k(video_path, audio_path)
+        if error:
+            job.update(status="error", message=error)
             return
 
         # Step 2: Load audio as numpy for transcription + per-segment language detection
@@ -409,16 +518,7 @@ def caption_worker(job_id: str, video_path: Path):
 
         # Step 3: Transcribe with Whisper (auto language detection)
         job.update(progress=20, message="Transcribing audio...")
-        segments_raw, detected_lang = backend.transcribe(
-            audio_array, beam_size=5, vad_filter=True,
-        )
-
-        # Collect segments
-        segments = [
-            {"start": seg.start, "end": seg.end, "text": seg.text}
-            for seg in segments_raw
-        ]
-        job.update(progress=45, message=f"Transcribed {len(segments)} segments...")
+        segments, detected_lang = transcribe_segments(audio_array, job)
 
         if not segments:
             job.update(status="error", message="No speech detected in video")
@@ -426,65 +526,20 @@ def caption_worker(job_id: str, video_path: Path):
 
         # Step 4: Detect language per segment by slicing audio
         job.update(progress=50, message="Detecting language per segment...")
-        for i, seg in enumerate(segments):
-            start_sample = int(seg["start"] * 16000)
-            end_sample = int(seg["end"] * 16000)
-            audio_slice = audio_array[start_sample:end_sample]
+        label_segment_languages(segments, audio_array, detected_lang, job)
 
-            # Need at least 0.5s of audio for reliable detection
-            if len(audio_slice) < 8000:
-                # Too short — fall back to file-level detection
-                seg["language"] = detected_lang
-            else:
-                lang, _ = backend.detect_language(audio_slice)
-                seg["language"] = lang
-
-            if (i + 1) % 10 == 0:
-                pct = 50 + int(15 * (i + 1) / len(segments))
-                job.update(progress=pct, message=f"Detecting language... ({i+1}/{len(segments)})")
-
-        es_count = sum(1 for s in segments if s["language"] == "es")
-        en_count = sum(1 for s in segments if s["language"] == "en")
-        job.update(progress=65, message=f"Found {es_count} Spanish, {en_count} English segments...")
+        summary = language_summary(segments)
+        job.update(progress=65, message=f"Found {summary} segments...")
 
         # Step 5: Install argostranslate packages for both directions
         ensure_argos_packages(job)
 
-        import argostranslate.translate
-
         # Step 6: Build original SRT (as-spoken) and translated SRT (flipped)
         job.update(progress=70, message="Translating segments...")
-        original_entries = []
-        translated_entries = []
-
-        for i, seg in enumerate(segments):
-            original_entries.append({
-                "start": seg["start"], "end": seg["end"], "text": seg["text"],
-            })
-
-            if seg["language"] == "es":
-                # Spanish segment → translate to English
-                en_text = argostranslate.translate.translate(seg["text"], "es", "en")
-                translated_entries.append({
-                    "start": seg["start"], "end": seg["end"], "text": en_text,
-                })
-            else:
-                # English (or other) segment → translate to Spanish
-                es_text = argostranslate.translate.translate(seg["text"], "en", "es")
-                translated_entries.append({
-                    "start": seg["start"], "end": seg["end"], "text": es_text,
-                })
-
-            if (i + 1) % 10 == 0:
-                pct = 70 + int(20 * (i + 1) / len(segments))
-                job.update(progress=pct, message=f"Translating... ({i+1}/{len(segments)})")
+        original_entries, translated_entries = build_srt_entries(segments, job)
 
         job.update(progress=92, message="Writing SRT files...")
-
-        original_srt = job_dir / f"{stem}.original.srt"
-        translated_srt = job_dir / f"{stem}.translated.srt"
-        write_srt(original_srt, original_entries)
-        write_srt(translated_srt, translated_entries)
+        files = write_caption_files(job_dir, stem, original_entries, translated_entries)
 
         # Clean up working files
         audio_path.unlink(missing_ok=True)
@@ -492,11 +547,12 @@ def caption_worker(job_id: str, video_path: Path):
 
         job.update(
             status="done", progress=100, message="Done!",
-            files=[original_srt.name, translated_srt.name],
-            detected_language=f"{es_count} Spanish, {en_count} English",
+            files=files,
+            detected_language=summary,
         )
 
-    except Exception as e:
+    # The job dict is the only channel back to the client, so report anything that fails.
+    except Exception as e:  # pylint: disable=broad-exception-caught
         job.update(status="error", message=str(e)[:300])
         print(f"Caption job {job_id} error: {e}", flush=True)
 
@@ -552,4 +608,5 @@ async def captions_download(job_id: str, filename: str):
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host=HOST, port=PORT)

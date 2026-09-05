@@ -1,35 +1,9 @@
-[MAIN]
-# CI lints without installing the runtime dependencies, so pylint cannot import
-# these. Listing them here skips both the import check and member checks on them.
-ignored-modules=
-    numpy,
-    scipy,
-    sounddevice,
-    fastapi,
-    starlette,
-    jinja2,
-    uvicorn,
-    websockets,
-    faster_whisper,
-    ctranslate2,
-    mlx_whisper,
-    argostranslate
-
 [MESSAGES CONTROL]
 disable=
     # This is an app, not a library — docstrings go where they earn their place.
     missing-module-docstring,
     missing-class-docstring,
     missing-function-docstring,
-    # Backends import their engine lazily so an absent optional one (mlx-whisper
-    # off Apple Silicon, faster-whisper without CUDA) doesn't break startup.
-    import-outside-toplevel,
-    # app.py runs module-level setup alongside its functions.
-    redefined-outer-name,
-    # Worker loops and warmup paths keep running when a single item fails.
-    broad-exception-caught,
-    # Size heuristics, not defects.
-    too-many-locals,
-    too-many-statements,
-    # The audio constants in tests/test_chunking.py deliberately mirror app.py.
+    # tests/test_chunking.py deliberately mirrors app.py's audio constants; the
+    # comment there explains why it can't import them.
     duplicate-code

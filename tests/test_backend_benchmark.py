@@ -106,7 +106,8 @@ def main():
             results.append(benchmark(name, args.model, audio, duration))
         except ImportError as e:
             print(f"\n=== {name} ===\n  SKIPPED: {e}")
-        except Exception as e:
+        # A benchmark run should report a broken backend, not stop at the first one.
+        except Exception as e:  # pylint: disable=broad-exception-caught
             print(f"\n=== {name} ===\n  FAILED: {e}")
 
     print("\n=== Summary ===")

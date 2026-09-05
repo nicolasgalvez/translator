@@ -1,3 +1,7 @@
+# Backends import their engine lazily so an absent optional one — mlx-whisper off
+# Apple Silicon, faster-whisper without CUDA — does not break importing this package.
+# pylint: disable=import-outside-toplevel
+
 import numpy as np
 
 from .base import Segment, TranscriptionBackend
@@ -29,7 +33,8 @@ class MlxWhisperBackend(TranscriptionBackend):
         try:
             silent = np.zeros(16000, dtype=np.float32)
             mw.transcribe(silent, path_or_hf_repo=self._repo, verbose=False)
-        except Exception as e:
+        # Warmup is an optimization; a failure here must not block using the backend.
+        except Exception as e:  # pylint: disable=broad-exception-caught
             print(f"Warning: mlx-whisper warmup failed: {e}", flush=True)
 
     def transcribe(

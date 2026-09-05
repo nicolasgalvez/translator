@@ -6,6 +6,7 @@ Uses tests/fixtures/conversation_es.wav (48kHz mono, ~70s of Spanish dialogue).
 """
 
 import os
+import wave
 
 import numpy as np
 from scipy.signal import resample_poly
@@ -41,7 +42,6 @@ REQUIRED_PHRASES = [
 
 def load_wav_48k(path: str) -> np.ndarray:
     """Load a 48kHz mono WAV as float32 array."""
-    import wave
     with wave.open(path, "rb") as wf:
         assert wf.getframerate() == SAMPLE_RATE
         assert wf.getnchannels() == 1
