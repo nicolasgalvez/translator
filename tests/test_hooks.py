@@ -29,8 +29,16 @@ class HookTests(unittest.TestCase):
     def test_actions_run_by_priority(self):
         calls = []
 
-        add_action("example", lambda payload, context: calls.append(("second", payload)), priority=20)
-        add_action("example", lambda payload, context: calls.append(("first", context["source"])), priority=5)
+        add_action(
+            "example",
+            lambda payload, context: calls.append(("second", payload)),
+            priority=20,
+        )
+        add_action(
+            "example",
+            lambda payload, context: calls.append(("first", context["source"])),
+            priority=5,
+        )
 
         do_action("example", {"ok": True}, {"source": "test"})
 
