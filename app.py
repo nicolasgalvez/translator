@@ -1,4 +1,3 @@
-import argparse
 import asyncio
 import json
 import os
@@ -128,7 +127,6 @@ def find_quietest_cut(audio: np.ndarray, lookback_seconds: float = 1.0,
 
 def load_audio_16k(path: Path) -> np.ndarray:
     """Load a WAV at 16kHz mono float32. The captions pipeline already extracts to this format."""
-    import wave
     with wave.open(str(path), "rb") as wf:
         assert wf.getframerate() == 16000, f"Expected 16kHz, got {wf.getframerate()}"
         assert wf.getnchannels() == 1
@@ -226,7 +224,7 @@ def audio_process_loop():
                     "en": en_text,
                     "time": datetime.now().strftime("%H:%M:%S"),
                 }
-                with open(transcript_file, "a") as f:
+                with open(transcript_file, "a", encoding="utf-8") as f:
                     f.write(json.dumps(entry) + "\n")
                 text_queue.put(entry)
 
@@ -399,7 +397,7 @@ def caption_worker(job_id: str, video_path: Path):
         result = subprocess.run(
             ["ffmpeg", "-i", str(video_path), "-vn", "-acodec", "pcm_s16le",
              "-ar", "16000", "-ac", "1", str(audio_path), "-y"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, check=False,
         )
         if result.returncode != 0:
             job.update(status="error", message=f"ffmpeg failed: {result.stderr[:200]}")

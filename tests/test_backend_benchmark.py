@@ -21,7 +21,7 @@ from scipy.signal import resample_poly
 
 # Make sibling 'transcription' package importable when run as a script
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from transcription import get_backend  # noqa: E402
+from transcription import get_backend  # noqa: E402  # pylint: disable=wrong-import-position
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "conversation_es.wav")
 
@@ -73,7 +73,7 @@ def benchmark(backend_name: str, model_size: str, audio: np.ndarray, duration: f
     if missing:
         print(f"  MISSING phrases: {missing}")
     else:
-        print(f"  all required phrases found")
+        print("  all required phrases found")
 
     return {
         "backend": backend_name,
