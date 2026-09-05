@@ -1,3 +1,7 @@
+# Backends import their engine lazily so an absent optional one — mlx-whisper off
+# Apple Silicon, faster-whisper without CUDA — does not break importing this package.
+# pylint: disable=import-outside-toplevel
+
 import numpy as np
 
 from .base import Segment, TranscriptionBackend
