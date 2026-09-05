@@ -17,14 +17,15 @@ class MlxWhisperBackend(TranscriptionBackend):
     name = "mlx-whisper"
 
     def __init__(self, model_size: str):
-        import mlx_whisper  # noqa: F401 — surface ImportError early
+        # Imported here so an ImportError surfaces when this backend is chosen,
+        # not when the package is loaded — mlx-whisper is Apple Silicon only.
+        import mlx_whisper as mw
 
+        self._mw = mw
         self._repo = MLX_MODEL_MAP.get(model_size, model_size)
         print(f"Loading mlx-whisper ({self._repo})...", flush=True)
         # mlx_whisper lazy-loads the model on first transcribe() call. Warm it up
         # with a tiny silent buffer so startup-time cost is paid up front.
-        import mlx_whisper as mw
-        self._mw = mw
         try:
             silent = np.zeros(16000, dtype=np.float32)
             mw.transcribe(silent, path_or_hf_repo=self._repo, verbose=False)

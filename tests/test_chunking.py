@@ -5,11 +5,11 @@ complete utterances from a real Spanish conversation without dropping words.
 Uses tests/fixtures/conversation_es.wav (48kHz mono, ~70s of Spanish dialogue).
 """
 
+import os
+
 import numpy as np
 from scipy.signal import resample_poly
 from faster_whisper import WhisperModel
-
-import os
 
 # Mirror the constants from app.py (can't import app directly — it has
 # module-level side effects like audio device init and model loading)
@@ -133,7 +133,7 @@ def test_chunking_captures_all_phrases():
     print(f"\n--- Chunked into {len(utterances)} utterances, {len(texts)} with text ---")
     for i, t in enumerate(texts):
         print(f"  [{i+1}] {t}")
-    print(f"\n--- Checking required phrases ---")
+    print("\n--- Checking required phrases ---")
 
     missing = []
     for phrase in REQUIRED_PHRASES:
