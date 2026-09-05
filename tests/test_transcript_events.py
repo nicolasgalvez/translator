@@ -21,14 +21,17 @@ class TranscriptEventTests(unittest.TestCase):
             event["metadata"] = {"backend": context["backend"]}
             return event
 
-        def before_render(event, context):
+        def before_render(event, _context):
             event = event.copy()
             event["render"] = {"html": f"<strong>{event['text']}</strong>"}
             return event
 
         add_filter("transcript.before_save", before_save)
         add_filter("transcript.before_render", before_render)
-        add_action("transcript.after_save", lambda event, context: after_save_calls.append(event.copy()))
+        add_action(
+            "transcript.after_save",
+            lambda event, context: after_save_calls.append(event.copy()),
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             transcript_file = Path(tmp) / "session.jsonl"
@@ -48,7 +51,8 @@ class TranscriptEventTests(unittest.TestCase):
         self.assertEqual(after_save_calls[0]["text"], "HELLO WORLD")
 
     def test_queue_transcript_render_event_fires_after_render_action(self):
-        class OutputQueue:
+        # Test double: only needs the put() that queue_transcript_render_event calls.
+        class OutputQueue:  # pylint: disable=too-few-public-methods
             def __init__(self):
                 self.items = []
 
@@ -59,7 +63,10 @@ class TranscriptEventTests(unittest.TestCase):
         event = {"id": "1", "text": "hello", "time": "12:00:00"}
         output_queue = OutputQueue()
 
-        add_action("transcript.after_render", lambda payload, context: calls.append((payload, context)))
+        add_action(
+            "transcript.after_render",
+            lambda payload, context: calls.append((payload, context)),
+        )
 
         queue_transcript_render_event(event, output_queue, context={"source": "test"})
 
