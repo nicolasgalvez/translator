@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import sys
 import subprocess
 import threading
 import queue
@@ -18,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
+from language import LanguageOption
 from plugin_loader import load_plugins
 from transcript_events import process_transcript_text, queue_transcript_render_event
 from transcription import get_backend
@@ -28,6 +30,14 @@ PORT = int(os.environ.get("TRANSLATOR_PORT", "8765"))
 MODEL = os.environ.get("TRANSLATOR_MODEL", "small")
 DEVICE_NAME = os.environ.get("TRANSLATOR_DEVICE", "BlackHole 2ch")
 BACKEND = os.environ.get("TRANSLATOR_BACKEND", "faster-whisper")
+
+# Fail here, on one clear line, rather than once per utterance forever: the
+# transcribe call is wrapped in a broad except so a bad language would otherwise
+# just print and retry, leaving the app connected and silently producing nothing.
+try:
+    LANGUAGE = LanguageOption.from_env(os.environ)
+except ValueError as exc:
+    sys.exit(f"translator: {exc}")
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
@@ -197,8 +207,10 @@ def audio_process_loop():
             # Resample 48kHz -> 16kHz for Whisper
             audio_16k = resample_poly(audio, 1, 3).astype(np.float32)
 
-            # Single Whisper pass: transcribe Spanish (greedy).
-            segments, _ = backend.transcribe(audio_16k, language="es", beam_size=1)
+            # Single Whisper pass (greedy). LANGUAGE.code is None for auto-detect.
+            segments, _ = backend.transcribe(
+                audio_16k, language=LANGUAGE.code, beam_size=1
+            )
             text = extract_text(segments)
             entry = process_transcript_text(
                 text,

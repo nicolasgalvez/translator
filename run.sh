@@ -10,6 +10,7 @@ PORT=8765
 MODEL=small
 DEVICE="BlackHole 2ch"
 BACKEND=faster-whisper
+LANGUAGE=es
 FRONTEND_DEV=0
 SKIP_FRONTEND_BUILD=0
 
@@ -22,6 +23,7 @@ usage() {
     echo "  -m, --model MODEL    Whisper model: tiny, base, small, medium, large-v3 (default: small)"
     echo "  -d, --device DEVICE  Audio input device name (default: BlackHole 2ch)"
     echo "  -b, --backend NAME   Transcription backend: faster-whisper, mlx-whisper (default: faster-whisper)"
+    echo "  -l, --language CODE  Spoken language, e.g. en, es, ja, or 'auto' to detect (default: es)"
     echo "      --frontend-dev   Start the Vite dev server on http://127.0.0.1:5173"
     echo "      --skip-frontend-build"
     echo "                       Do not build the React frontend before starting"
@@ -49,6 +51,7 @@ while [[ $# -gt 0 ]]; do
         -m|--model)  MODEL="$2"; shift 2 ;;
         -d|--device) DEVICE="$2"; shift 2 ;;
         -b|--backend) BACKEND="$2"; shift 2 ;;
+        -l|--language) LANGUAGE="$2"; shift 2 ;;
         --frontend-dev) FRONTEND_DEV=1; shift ;;
         --skip-frontend-build) SKIP_FRONTEND_BUILD=1; shift ;;
         -h|--help)   usage; exit 0 ;;
@@ -98,7 +101,8 @@ export TRANSLATOR_PORT="$PORT"
 export TRANSLATOR_MODEL="$MODEL"
 export TRANSLATOR_DEVICE="$DEVICE"
 export TRANSLATOR_BACKEND="$BACKEND"
+export TRANSLATOR_LANGUAGE="$LANGUAGE"
 
-echo "Starting transcriber (host=$HOST, port=$PORT, model=$MODEL, device=$DEVICE, backend=$BACKEND)"
+echo "Starting transcriber (host=$HOST, port=$PORT, model=$MODEL, device=$DEVICE, backend=$BACKEND, language=$LANGUAGE)"
 cd "$SCRIPT_DIR"
 python app.py
