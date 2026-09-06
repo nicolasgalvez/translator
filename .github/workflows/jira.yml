@@ -1,0 +1,72 @@
+name: Jira
+
+# Cost rule: ONE job, one runner per event (every job bills a 1-min minimum).
+# No `synchronize` — pushes to an open PR don't need Jira churn; sync/QA
+# happen at open, Done at merge.
+on:
+  pull_request:
+    types: [opened, reopened, closed]
+
+jobs:
+  jira:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: procyon-creative/jira-action-man@v2
+        id: jira
+        with:
+          projects: "TRAN"
+          from: "branch,title,commits,body"
+          post_to_jira: ${{ github.event.action != 'closed' }}
+          jira_comment_mode: update
+          jira_base_url: ${{ secrets.JIRA_BASE_URL }}
+          jira_email: ${{ secrets.JIRA_EMAIL }}
+          jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Transition Jira issues
+        if: >-
+          steps.jira.outputs.found == 'true' &&
+          (github.event.action == 'opened' || github.event.action == 'reopened' ||
+           github.event.pull_request.merged == true)
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_KEYS: ${{ steps.jira.outputs.keys }}
+          TARGET_COLUMN: ${{ github.event.pull_request.merged == true && 'Done' || 'QA' }}
+        run: |
+          set -euo pipefail
+          : "${JIRA_BASE_URL:?JIRA_BASE_URL secret is empty}"
+          : "${JIRA_EMAIL:?JIRA_EMAIL secret is empty}"
+          : "${JIRA_API_TOKEN:?JIRA_API_TOKEN secret is empty}"
+          : "${JIRA_KEYS:?JIRA_KEYS output from jira-action-man is empty}"
+
+          # Defensive cleanup: strip whitespace/newlines that have caused curl
+          # to misinterpret the URL as an option in past runs.
+          JIRA_BASE_URL="$(printf '%s' "$JIRA_BASE_URL" | tr -d '[:space:]')"
+          JIRA_BASE_URL="${JIRA_BASE_URL%/}"
+
+          for key in $(echo "$JIRA_KEYS" | jq -r '.[]'); do
+            echo "Transitioning $key to $TARGET_COLUMN..."
+            url="${JIRA_BASE_URL}/rest/api/3/issue/${key}/transitions"
+
+            TRANSITIONS=$(curl --silent --fail-with-body \
+              --user "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+              --url "$url") || { echo "  ⚠ Could not fetch transitions for $key — skipping."; continue; }
+            TARGET_ID=$(echo "$TRANSITIONS" | jq -r --arg name "$TARGET_COLUMN" \
+              '.transitions[] | select(.name == $name) | .id')
+
+            if [ -z "$TARGET_ID" ] || [ "$TARGET_ID" = "null" ]; then
+              echo "  ⚠ No '$TARGET_COLUMN' transition available for $key — skipping."
+              continue
+            fi
+
+            curl --silent --fail-with-body \
+              --user "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+              --request POST \
+              --header "Content-Type: application/json" \
+              --data "$(jq -n --arg id "$TARGET_ID" '{transition:{id:$id}}')" \
+              --url "$url"
+            echo "  ✓ $key → $TARGET_COLUMN"
+          done
