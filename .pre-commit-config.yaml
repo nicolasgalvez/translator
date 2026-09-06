@@ -1,0 +1,21 @@
+# Runs on staged files only. Full-repo lint lives in CI (.github/workflows/pylint.yml).
+# Install once with: pip install -r requirements-dev.txt && pre-commit install
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        # Session recordings land in transcripts/; keep them out of git by accident.
+        args: [--maxkb=1024]
+
+  - repo: local
+    hooks:
+      - id: pylint
+        name: pylint
+        entry: python -m pylint
+        language: system
+        types: [python]
