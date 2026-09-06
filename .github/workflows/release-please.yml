@@ -17,6 +17,24 @@ concurrency:
 
 jobs:
   release-please:
+    # Only spin up a runner when the push could actually produce a release.
+    # release-please rebuilds the release PR from the whole commit range since the
+    # last release on every run, so skipping a chore-only push drops nothing — the
+    # next releasable push picks those commits up.
+    #
+    # Matching is deliberately loose. A false positive costs one runner minute; a
+    # false negative silently withholds a release, which nobody notices until they
+    # go looking for a tag that never appeared.
+    #
+    # Reads every commit in the push, not just head_commit: a rebase-merge lands
+    # several at once and the last one is often the chore. The final clause keeps
+    # release-please's own release PR running — that merge is what tags the repo.
+    if: >-
+      contains(join(github.event.commits.*.message, '||'), 'feat') ||
+      contains(join(github.event.commits.*.message, '||'), 'fix') ||
+      contains(join(github.event.commits.*.message, '||'), 'perf') ||
+      contains(join(github.event.commits.*.message, '||'), '!:') ||
+      startsWith(github.event.head_commit.message, 'chore(main): release')
     runs-on: ubuntu-latest
     steps:
       - uses: googleapis/release-please-action@v5
