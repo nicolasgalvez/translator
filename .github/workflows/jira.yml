@@ -2,13 +2,18 @@ name: Jira
 
 # Cost rule: ONE job, one runner per event (every job bills a 1-min minimum).
 # No `synchronize` — pushes to an open PR don't need Jira churn; sync/QA
-# happen at open, Done at merge.
+# happen at open, Done at merge. `ci-failure` is guarded on the run conclusion
+# so a green CI run starts no runner at all.
 on:
   pull_request:
     types: [opened, reopened, closed]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
 
 jobs:
   jira:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -70,3 +75,27 @@ jobs:
               --url "$url"
             echo "  ✓ $key → $TARGET_COLUMN"
           done
+
+  # Files a Jira ticket when CI goes red, including for PRs that carry no issue
+  # key at all — a failing dependabot PR would otherwise fail silently. The
+  # action dedupes by label, so repeated failures on one PR reuse a single open
+  # ticket.
+  #
+  # This lives in jira.yml rather than its own workflow file on purpose:
+  # /project-jira-setup deletes jira-action-man usage it finds outside this file.
+  ci-failure:
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: procyon-creative/jira-action-man@v2
+        with:
+          create_issue_on_failure: true
+          issue_project: "TRAN"
+          issue_type: "Bug"
+          jira_base_url: ${{ secrets.JIRA_BASE_URL }}
+          jira_email: ${{ secrets.JIRA_EMAIL }}
+          jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
