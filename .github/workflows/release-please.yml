@@ -6,6 +6,11 @@ name: Release
 on:
   push:
     branches: [main]
+  # Lets a stuck release be retried. Without it the job below is only reachable
+  # from a releasable push, so a run that fails — as one did on a repo-permission
+  # error — leaves the release uncut until someone happens to land another
+  # feat/fix/perf commit.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -29,7 +34,12 @@ jobs:
     # Reads every commit in the push, not just head_commit: a rebase-merge lands
     # several at once and the last one is often the chore. The final clause keeps
     # release-please's own release PR running — that merge is what tags the repo.
+    #
+    # The workflow_dispatch clause must come first and short-circuit: a manual run
+    # carries no `commits` or `head_commit` in its payload, and a manual run is
+    # always deliberate, so it is never filtered.
     if: >-
+      github.event_name == 'workflow_dispatch' ||
       contains(join(github.event.commits.*.message, '||'), 'feat') ||
       contains(join(github.event.commits.*.message, '||'), 'fix') ||
       contains(join(github.event.commits.*.message, '||'), 'perf') ||
