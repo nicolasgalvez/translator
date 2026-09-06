@@ -1,13 +1,16 @@
 name: Pylint
 
-on: [push]
+on:
+  workflow_call:
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  pylint:
+    name: pylint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
     - uses: actions/checkout@v4
     - name: Set up Python
