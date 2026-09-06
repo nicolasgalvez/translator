@@ -1,0 +1,32 @@
+name: Pytest
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+        cache: pip
+        cache-dependency-path: requirements-dev.txt
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-dev.txt
+    - name: Run tests
+      # test_chunking and test_backend_benchmark each load a Whisper model
+      # (~500MB download, CPU inference). Those run locally, not per-PR.
+      run: |
+        pytest tests -q \
+          --ignore=tests/test_chunking.py \
+          --ignore=tests/test_backend_benchmark.py
