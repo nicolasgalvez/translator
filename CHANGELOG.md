@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.1](https://github.com/nicolasgalvez/translator/compare/v0.2.0...v0.2.1) (2026-09-07)
+
+
+### Bug Fixes
+
+* replace the deprecated on_event startup hook with a lifespan handler ([f47ff71](https://github.com/nicolasgalvez/translator/commit/f47ff716be05367e59e3a4616c0cd21ecbcae357))
+
+
+### Performance Improvements
+
+* skip the frontend build when the bundle is up to date ([875785f](https://github.com/nicolasgalvez/translator/commit/875785fb7bf285c31b43865bc030d91794a9d638))
+
 ## [0.2.0](https://github.com/nicolasgalvez/translator/compare/v0.1.0...v0.2.0) (2026-09-07)
 
 
