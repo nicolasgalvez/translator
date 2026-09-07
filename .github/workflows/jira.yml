@@ -29,16 +29,29 @@ jobs:
           jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Second, narrower extraction. The step above reads branch, title, commits
+      # and body so its comment reaches every ticket a PR references — which is
+      # right for commenting and wrong for transitioning: it would mark a ticket
+      # Done merely for being mentioned. The branch names the one ticket this PR
+      # is actually for, per the <type>/<KEY>-<desc> convention.
+      - uses: procyon-creative/jira-action-man@v2
+        id: jira_branch
+        with:
+          projects: "TRAN"
+          from: "branch"
+          post_to_jira: false
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Transition Jira issues
         if: >-
-          steps.jira.outputs.found == 'true' &&
+          steps.jira_branch.outputs.found == 'true' &&
           (github.event.action == 'opened' || github.event.action == 'reopened' ||
            github.event.pull_request.merged == true)
         env:
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          JIRA_KEYS: ${{ steps.jira.outputs.keys }}
+          JIRA_KEYS: ${{ steps.jira_branch.outputs.keys }}
           TARGET_COLUMN: ${{ github.event.pull_request.merged == true && 'Done' || 'QA' }}
         run: |
           set -euo pipefail
