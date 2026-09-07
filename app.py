@@ -7,6 +7,7 @@ import threading
 import queue
 import uuid
 import wave
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -39,7 +40,37 @@ try:
 except ValueError as exc:
     sys.exit(f"translator: {exc}")
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Start the capture, processing and broadcast work for the app's lifetime.
+
+    Replaces the deprecated on_event("startup") hook. The bodies of the loops
+    referenced here are defined further down the module; that is fine, since
+    nothing runs until FastAPI enters this context.
+    """
+    loaded_plugins = load_plugins()
+    if loaded_plugins:
+        print(f"Loaded plugins: {', '.join(loaded_plugins)}", flush=True)
+    # Capture thread: records audio continuously via sd.rec()
+    threading.Thread(target=audio_capture_loop, daemon=True).start()
+    # Processing thread: transcribes chunks from the queue
+    threading.Thread(target=audio_process_loop, daemon=True).start()
+    broadcast = asyncio.create_task(broadcast_loop())
+
+    yield
+
+    # The two threads are daemons and die with the process. The broadcast task
+    # is ours, and an un-cancelled task makes shutdown hang waiting on a loop
+    # that never returns, so cancel it explicitly rather than relying on exit.
+    broadcast.cancel()
+    try:
+        await broadcast
+    except asyncio.CancelledError:
+        pass
+
+
+app = FastAPI(lifespan=lifespan)
 templates = Jinja2Templates(directory="templates")
 FRONTEND_DIST = Path("frontend/dist")
 
@@ -231,20 +262,6 @@ def audio_process_loop():
 
 # Connected WebSocket clients
 clients: list[WebSocket] = []
-
-
-@app.on_event("startup")
-async def startup():
-    loaded_plugins = load_plugins()
-    if loaded_plugins:
-        print(f"Loaded plugins: {', '.join(loaded_plugins)}", flush=True)
-    # Capture thread: records audio continuously via sd.rec()
-    capture = threading.Thread(target=audio_capture_loop, daemon=True)
-    capture.start()
-    # Processing thread: transcribes chunks from the queue
-    process = threading.Thread(target=audio_process_loop, daemon=True)
-    process.start()
-    asyncio.create_task(broadcast_loop())
 
 
 async def broadcast_loop():
