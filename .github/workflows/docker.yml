@@ -45,7 +45,7 @@ jobs:
       # Fails when package.json and package-lock.json have drifted, which is the
       # failure this whole workflow exists to catch.
       - name: Build the frontend stage
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           target: frontend
