@@ -126,8 +126,8 @@ Requires NVIDIA GPU runtime for CUDA acceleration. Falls back to CPU if unavaila
 ## Running Tests
 
 ```bash
-python -m unittest discover -s tests -p 'test_hooks.py'
-python -m unittest discover -s tests -p 'test_transcript_events.py'
+uv run --only-group dev python -m unittest discover -s tests -p 'test_hooks.py'
+uv run --only-group dev python -m unittest discover -s tests -p 'test_transcript_events.py'
 
 cd frontend
 npm test
@@ -136,6 +136,5 @@ npm test
 The existing chunking test still verifies silence-based audio splitting against a real fixture:
 
 ```bash
-source .venv/bin/activate
-python tests/test_chunking.py
+uv run python tests/test_chunking.py
 ```
