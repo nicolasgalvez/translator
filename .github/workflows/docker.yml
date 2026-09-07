@@ -14,7 +14,8 @@ on:
     paths: &docker_paths
       - "Dockerfile"
       - "docker-compose.yml"
-      - "requirements*.txt"
+      - "pyproject.toml"
+      - "uv.lock"
       - "frontend/**"
       - ".github/workflows/docker.yml"
   push:

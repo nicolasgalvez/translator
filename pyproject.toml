@@ -1,0 +1,71 @@
+[project]
+name = "translator"
+version = "0.2.1"  # x-release-please-version
+description = "Live bilingual transcription and video captioning."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "websockets",
+    "jinja2",
+    "sounddevice",
+    "numpy",
+    "scipy",
+    "faster-whisper",
+    "python-multipart",
+    "argostranslate",
+]
+
+[project.optional-dependencies]
+# Apple Silicon only — mlx-whisper publishes no wheels for anything else, so the
+# marker keeps `uv lock` resolvable on a Linux runner that will never install it.
+mlx = ["mlx-whisper; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+
+# torch arrives transitively (argostranslate -> stanza -> torch). It is named
+# here only so [tool.uv.sources] can steer which index it comes from: a source
+# entry for a package that is not a direct dependency is silently ignored, and
+# `uv lock` still exits 0 having resolved it from PyPI.
+#
+# sys_platform cannot tell CI-Linux from Docker-Linux — both are "linux" — so
+# the choice has to be an extra rather than a marker.
+cpu = ["torch; sys_platform == 'linux'"]
+cuda = ["torch; sys_platform == 'linux'"]
+
+[dependency-groups]
+dev = ["pytest", "pylint", "pre-commit"]
+
+[tool.uv]
+# `environments`, not `required-environments`: the latter demands wheels exist
+# for every listed environment, which drags the cuda extra onto macOS arm64 and
+# fails with a message about torch lacking arm64 wheels — misleading, since the
+# real problem is the configuration.
+environments = [
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+# cpu and cuda can never be installed together. Declaring the conflict lets uv
+# lock a valid resolution for each instead of failing to unify them.
+conflicts = [[{ extra = "cpu" }, { extra = "cuda" }]]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cuda"
+# CUDA version is pinned by URL, not by a version constraint — moving CUDA means
+# editing this line.
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cuda", extra = "cuda" },
+]
+
+[tool.pytest.ini_options]
+# Replaces the root conftest.py: the modules under test live at the repo root,
+# and bare `pytest tests` would otherwise only put tests/ on sys.path.
+pythonpath = ["."]
