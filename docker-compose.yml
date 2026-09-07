@@ -7,6 +7,7 @@ services:
       - TRANSLATOR_PORT=${TRANSLATOR_PORT:-8765}
       - TRANSLATOR_MODEL=${TRANSLATOR_MODEL:-small}
       - TRANSLATOR_DEVICE=${TRANSLATOR_DEVICE:-default}
+      - TRANSLATOR_LANGUAGE=${TRANSLATOR_LANGUAGE:-es}
     volumes:
       - ./transcripts:/app/transcripts
     devices:

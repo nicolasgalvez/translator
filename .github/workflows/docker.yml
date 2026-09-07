@@ -1,0 +1,57 @@
+name: Docker
+
+# Deliberately NOT wired into ci.yml. That orchestrator would need a paths-filter
+# job to decide whether to build, and such a job bills a runner minute on every
+# single PR — more than this check costs on the rare PR that actually touches the
+# image. A top-level `paths:` filter is evaluated by GitHub for free.
+#
+# The frontend stage is built in full: it is cheap, and `npm ci` against the lock
+# file is where the realistic breakage lives. The CUDA stage is only linted, not
+# built — nvidia/cuda plus torch is several GB, and spending ten minutes pulling
+# layers per PR to prove apt-get still works is not a trade worth making.
+on:
+  pull_request:
+    paths: &docker_paths
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - "requirements*.txt"
+      - "frontend/**"
+      - ".github/workflows/docker.yml"
+  push:
+    branches: [main]
+    paths: *docker_paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker:
+    name: docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Lint the Dockerfile
+        run: docker build --check .
+
+      # Fails when package.json and package-lock.json have drifted, which is the
+      # failure this whole workflow exists to catch.
+      - name: Build the frontend stage
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: frontend
+          push: false
+          load: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Validate the compose file
+        run: docker compose config --quiet
