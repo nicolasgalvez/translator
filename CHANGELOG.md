@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.3](https://github.com/nicolasgalvez/translator/compare/v0.2.2...v0.2.3) (2026-09-07)
+
+
+### Bug Fixes
+
+* **ci:** refresh uv.lock on the release branch ([ecd97ff](https://github.com/nicolasgalvez/translator/commit/ecd97ffa17c351cab4d50f11f0cbd6fde6ce5f71))
+* sync the pyproject version with version.txt ([d855133](https://github.com/nicolasgalvez/translator/commit/d85513330f084ae09530c3e95d282ac60757c270))
+
 ## [0.2.2](https://github.com/nicolasgalvez/translator/compare/v0.2.1...v0.2.2) (2026-09-07)
 
 
