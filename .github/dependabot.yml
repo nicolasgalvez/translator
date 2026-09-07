@@ -1,6 +1,9 @@
 version: 2
 updates:
-  - package-ecosystem: pip
+  # uv is its own Dependabot ecosystem, not a pip variant. Leaving this as `pip`
+  # after the requirements*.txt files were removed left it matching no manifest,
+  # and Dependabot does not warn about that — it just stops opening PRs.
+  - package-ecosystem: uv
     directory: /
     schedule:
       interval: monthly
