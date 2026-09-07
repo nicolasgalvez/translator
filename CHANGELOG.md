@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/nicolasgalvez/translator/compare/v0.2.1...v0.2.2) (2026-09-07)
+
+
+### Bug Fixes
+
+* **ci:** transition only the ticket the branch names ([564b5fe](https://github.com/nicolasgalvez/translator/commit/564b5fefc3df29d381ccbc83029ac059db77ef70))
+
 ## [0.2.1](https://github.com/nicolasgalvez/translator/compare/v0.2.0...v0.2.1) (2026-09-07)
 
 
