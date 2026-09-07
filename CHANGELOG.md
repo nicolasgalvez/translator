@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.2](https://github.com/nicolasgalvez/translator/compare/v0.2.1...v0.2.2) (2026-09-07)
+
+
+### Bug Fixes
+
+* **ci:** transition only the ticket the branch names ([564b5fe](https://github.com/nicolasgalvez/translator/commit/564b5fefc3df29d381ccbc83029ac059db77ef70))
+* point Dependabot at uv and update the README's test commands ([2d4605f](https://github.com/nicolasgalvez/translator/commit/2d4605ff233be80342f09107705228ac30a17e39))
+
 ## [0.2.1](https://github.com/nicolasgalvez/translator/compare/v0.2.0...v0.2.1) (2026-09-07)
 
 
