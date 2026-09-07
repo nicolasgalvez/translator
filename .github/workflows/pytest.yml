@@ -23,13 +23,15 @@ jobs:
         enable-cache: true
         cache-dependency-glob: uv.lock
     - name: Install dependencies
-      # --extra cpu keeps torch off the CUDA index; the default wheel would drag
-      # a CUDA runtime a test job has no use for.
-      run: uv sync --locked --group dev --extra cpu
+      # --only-group dev: the tests that run here import stdlib plus the repo's
+      # own modules and nothing else. Syncing the project's runtime tree would
+      # download torch to run tests that never touch it — measured at 60s
+      # against 1.8s for the dev group alone.
+      run: uv sync --locked --only-group dev
     - name: Run tests
       # test_chunking and test_backend_benchmark each load a Whisper model
       # (~500MB download, CPU inference). Those run locally, not per-PR.
       run: |
-        uv run pytest tests -q \
+        uv run --only-group dev pytest tests -q \
           --ignore=tests/test_chunking.py \
           --ignore=tests/test_backend_benchmark.py
