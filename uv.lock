@@ -3068,7 +3068,7 @@ wheels = [
 
 [[package]]
 name = "translator"
-version = "0.2.1"
+version = "0.2.2"
 source = { virtual = "." }
 dependencies = [
     { name = "argostranslate", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'linux' and extra == 'extra-10-translator-cpu' and extra == 'extra-10-translator-cuda') or (sys_platform == 'darwin' and extra == 'extra-10-translator-cpu' and extra == 'extra-10-translator-cuda') or (sys_platform == 'linux' and extra == 'extra-10-translator-cpu' and extra == 'extra-10-translator-cuda')" },
