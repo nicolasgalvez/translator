@@ -1,0 +1,52 @@
+name: Frontend
+
+# Same shape as docker.yml, for the same reason: a top-level `paths:` filter is
+# evaluated by GitHub for free, whereas wiring this into ci.yml's orchestrator
+# would need a paths-filter job billing a runner minute on every PR.
+#
+# Runs the build as well as the tests. `npm run build` is `tsc && vite build`,
+# so it is the only thing here that catches a type regression — a green test
+# suite will not.
+on:
+  pull_request:
+    paths: &frontend_paths
+      - "frontend/**"
+      - ".github/workflows/frontend.yml"
+  push:
+    branches: [main]
+    paths: *frontend_paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: frontend
+
+jobs:
+  frontend:
+    name: vitest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # Fails when package.json and package-lock.json have drifted.
+      - name: Install
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Type check and build
+        run: npm run build
