@@ -79,8 +79,33 @@ else
     fi
 fi
 
+# True when any build input is newer than the bundle, or there is no bundle.
+# dist/index.html is the reference because vite always emits it, so its mtime
+# marks when the bundle was last produced.
+#
+# Errs toward building: a needless rebuild costs seconds, while a skipped one
+# serves a stale bundle that looks like a code change silently not working.
+frontend_needs_build() {
+    local fe="$SCRIPT_DIR/frontend"
+    local ref="$fe/dist/index.html"
+
+    [ -f "$ref" ] || return 0
+
+    local inputs=("$fe/src" "$fe/index.html" "$fe/package.json" "$fe/package-lock.json")
+    local cfg
+    for cfg in "$fe"/vite.config.*; do
+        [ -e "$cfg" ] && inputs+=("$cfg")
+    done
+
+    [ -n "$(find "${inputs[@]}" -newer "$ref" -print -quit 2>/dev/null)" ]
+}
+
 if [ -f "$SCRIPT_DIR/frontend/package.json" ]; then
-    if [ ! -d "$SCRIPT_DIR/frontend/node_modules" ]; then
+    # npm writes node_modules/.package-lock.json on install, so a lock file
+    # newer than it means the tree is out of date. Checking only that
+    # node_modules exists — as this did — never reinstalls after a lock change.
+    if [ ! -d "$SCRIPT_DIR/frontend/node_modules" ] || \
+       [ "$SCRIPT_DIR/frontend/package-lock.json" -nt "$SCRIPT_DIR/frontend/node_modules/.package-lock.json" ]; then
         echo "Installing frontend dependencies..."
         (cd "$SCRIPT_DIR/frontend" && npm install)
     fi
@@ -90,9 +115,14 @@ if [ -f "$SCRIPT_DIR/frontend/package.json" ]; then
         (cd "$SCRIPT_DIR/frontend" && npm run dev) &
         FRONTEND_PID=$!
         trap 'kill "$FRONTEND_PID" 2>/dev/null || true' EXIT
-    elif [ "$SKIP_FRONTEND_BUILD" != "1" ]; then
+    elif [ "$SKIP_FRONTEND_BUILD" = "1" ]; then
+        echo "Skipping frontend build (--skip-frontend-build)."
+    elif frontend_needs_build; then
         echo "Building frontend..."
         (cd "$SCRIPT_DIR/frontend" && npm run build)
+    else
+        # Say so out loud: a silent skip is indistinguishable from a staleness bug.
+        echo "Frontend up to date - skipping build."
     fi
 fi
 
