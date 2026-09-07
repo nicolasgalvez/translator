@@ -2,7 +2,6 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-VENV_DIR="$SCRIPT_DIR/.venv"
 
 # Defaults
 HOST=127.0.0.1
@@ -59,25 +58,21 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Create venv and install deps on first run
-if [ ! -d "$VENV_DIR" ]; then
-    echo "First run — setting up virtual environment..."
-    python3 -m venv "$VENV_DIR"
-    source "$VENV_DIR/bin/activate"
-    pip install --upgrade pip -q
-    if [ "$BACKEND" = "mlx-whisper" ]; then
-        pip install -r "$SCRIPT_DIR/requirements-mlx.txt" -q
-    else
-        pip install -r "$SCRIPT_DIR/requirements.txt" -q
-    fi
-    echo "Setup complete."
-else
-    source "$VENV_DIR/bin/activate"
-    if [ "$BACKEND" = "mlx-whisper" ] && ! python -c "import mlx_whisper" 2>/dev/null; then
-        echo "Installing mlx-whisper..."
-        pip install mlx-whisper -q
-    fi
+# uv creates and syncs .venv from uv.lock on demand, so there is no first-run
+# branch, no manual activation, and no "is mlx_whisper importable yet" probe —
+# switching backends just changes which extra is synced.
+if ! command -v uv >/dev/null 2>&1; then
+    echo "uv is required but not installed." >&2
+    echo "Install it with: curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+    echo "See https://docs.astral.sh/uv/ for other options." >&2
+    exit 1
 fi
+
+SYNC_ARGS=(--quiet)
+if [ "$BACKEND" = "mlx-whisper" ]; then
+    SYNC_ARGS+=(--extra mlx)
+fi
+(cd "$SCRIPT_DIR" && uv sync "${SYNC_ARGS[@]}")
 
 # True when any build input is newer than the bundle, or there is no bundle.
 # dist/index.html is the reference because vite always emits it, so its mtime
@@ -135,4 +130,4 @@ export TRANSLATOR_LANGUAGE="$LANGUAGE"
 
 echo "Starting transcriber (host=$HOST, port=$PORT, model=$MODEL, device=$DEVICE, backend=$BACKEND, language=$LANGUAGE)"
 cd "$SCRIPT_DIR"
-python app.py
+uv run python app.py

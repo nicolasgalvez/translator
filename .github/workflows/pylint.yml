@@ -17,15 +17,16 @@ jobs:
       uses: actions/setup-python@v7
       with:
         python-version: "3.11"
-        cache: pip
-        cache-dependency-path: requirements.txt
+    - name: Install uv
+      uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
+        cache-dependency-glob: uv.lock
     - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        # CPU torch only. argostranslate pulls stanza, which pulls torch, and the
-        # default wheel ships the CUDA runtime we have no use for in a lint job.
-        pip install torch --index-url https://download.pytorch.org/whl/cpu
-        pip install -r requirements.txt pylint
+      # The CPU torch index is declared in pyproject.toml, so the hand-rolled
+      # pre-install of a CPU wheel that used to live here is no longer needed —
+      # --extra cpu selects it from the lockfile.
+      run: uv sync --locked --group dev --extra cpu
     - name: Analysing the code with pylint
       run: |
-        pylint $(git ls-files '*.py')
+        uv run pylint $(git ls-files '*.py')

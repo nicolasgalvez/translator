@@ -1,5 +1,5 @@
 # Runs on staged files only. Full-repo lint lives in CI (.github/workflows/pylint.yml).
-# Install once with: pip install -r requirements-dev.txt && pre-commit install
+# Install once with: uv sync --group dev && uv run pre-commit install
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
