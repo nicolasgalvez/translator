@@ -6,7 +6,7 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS runtime-base
+FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04 AS runtime-base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates libportaudio2 libsndfile1 ffmpeg \
