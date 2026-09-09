@@ -217,6 +217,11 @@ docker compose up --build
 
 Requires NVIDIA GPU runtime for CUDA acceleration. Falls back to CPU if unavailable.
 
+Docker builds exclude local `.env` files, saved transcripts, caption uploads, and
+generated subtitles from the build context. Supply configuration at runtime and
+never bake secrets or user media into an image. The Compose configuration persists
+transcripts in `./transcripts`; caption job files remain ephemeral in the container.
+
 ## Running Tests
 
 ```bash

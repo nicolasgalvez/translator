@@ -1,5 +1,8 @@
 .venv/
 .history/
+.env
+.env.*
+!.env.example
 transcripts/
 captions/
 __pycache__/
