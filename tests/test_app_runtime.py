@@ -180,6 +180,56 @@ def test_audio_chunker_waits_for_minimum_and_two_silent_chunks():
     assert not np.any(output[6000:])
 
 
+def test_audio_silent_tail_never_reaches_inference_after_combined_boundary(tmp_path):
+    importlib.import_module("scipy.signal")
+    module = importlib.import_module("translator_runtime")
+    received = []
+
+    class Backend:  # pylint: disable=too-few-public-methods
+        name = "fixture"
+
+        def transcribe(self, audio, **_kwargs):
+            received.append(audio.copy())
+            return [SimpleNamespace(text="speech")], "es"
+
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+    runtime.backend = Backend()
+    runtime.transcript_file = tmp_path / "session.jsonl"
+    first = np.full(240000, 0.1, dtype="float32")
+    first[218400:220800] = 0.001
+    chunks = [first[start:start + 12000] for start in range(0, len(first), 12000)]
+    chunks += [np.full(12000, 0.1, dtype="float32") for _ in range(17)]
+    chunks += [np.zeros(12000, dtype="float32") for _ in range(20)]
+    start_audio_workers(runtime)
+    try:
+        for chunk in chunks:
+            runtime.audio_chunk_queue.put(chunk)
+            wait_until(lambda: runtime.audio_chunk_queue.unfinished_tasks == 0)
+            wait_until(lambda: runtime.utterance_queue.unfinished_tasks == 0)
+        assert len(received) == 2
+        assert [len(audio) for audio in received] == [73600, 80000]
+        assert all(np.any(audio) for audio in received)
+        assert runtime.audio_chunker.buffered_samples <= 24000
+    finally:
+        asyncio.run(runtime.stop())
+
+
+def test_audio_mixed_carried_tail_keeps_its_existing_silence_count():
+    chunker = importlib.import_module("audio_pipeline").UtteranceChunker()
+    audio = np.full(240000, 0.1, dtype="float32")
+    audio[192000:194400] = 0
+    audio[228000:] = 0
+    first = None
+    for start in range(0, len(audio), 12000):
+        first = chunker.add(audio[start:start + 12000])
+    assert len(first) == 194400  # 4.05s cut; tail includes speech and one silent read.
+    second = chunker.add(np.zeros(12000, dtype="float32"))
+    assert second is not None  # The next silent read completes the natural pause.
+    assert len(second) == 57600
+    np.testing.assert_array_equal(np.concatenate([first, second]), np.pad(audio, (0, 12000)))
+    assert chunker.buffered_samples == 0
+
+
 def test_audio_pending_overload_recovers_with_recent_utterances(tmp_path, caplog):
     importlib.import_module("scipy.signal")
     module = importlib.import_module("translator_runtime")

@@ -83,16 +83,8 @@ class UtteranceChunker:
 
         if chunk.ndim != 1 or not 0 < len(chunk) <= int(SAMPLE_RATE * CAPTURE_CHUNK):
             raise ValueError("Expected a nonempty mono audio chunk of at most 0.25 seconds")
-        self._chunks.append(chunk)
-        self.buffered_samples += len(chunk)
-        if np.abs(chunk).mean() < SILENCE_THRESHOLD:
-            self._silent_count = min(self._silent_count + 1, SILENCE_CHUNKS_TO_SPLIT)
-        else:
-            self._silent_count = 0
-            self._has_speech = True
+        self._append_chunk(chunk)
         if not self._has_speech:
-            while len(self._chunks) > SILENCE_CHUNKS_TO_SPLIT:
-                self.buffered_samples -= len(self._chunks.popleft())
             return None
 
         natural_break = (self._silent_count >= SILENCE_CHUNKS_TO_SPLIT
@@ -104,16 +96,38 @@ class UtteranceChunker:
         if forced_break:
             window = audio[:SAMPLE_RATE * MAX_UTTERANCE]
             cut = len(window) if natural_break else self.find_quietest_cut(window)
-            # Copy the remainder so it cannot retain an already emitted array.
-            tail = audio[cut:].copy()
-            self.reset()
-            if len(tail):
-                self._chunks.append(tail)
-                self.buffered_samples = len(tail)
-                self._has_speech = True
+            self._restore_tail(cut)
             return audio[:cut].copy()
         self.reset()
         return audio
+
+    def _append_chunk(self, chunk):
+        """Classify actual retained samples, preserving capture boundaries."""
+        import numpy as np  # pylint: disable=import-outside-toplevel
+
+        self._chunks.append(chunk)
+        self.buffered_samples += len(chunk)
+        if np.abs(chunk).mean() < SILENCE_THRESHOLD:
+            self._silent_count = min(self._silent_count + 1, SILENCE_CHUNKS_TO_SPLIT)
+        else:
+            self._silent_count = 0
+            self._has_speech = True
+        if not self._has_speech:
+            while len(self._chunks) > SILENCE_CHUNKS_TO_SPLIT:
+                self.buffered_samples -= len(self._chunks.popleft())
+
+    def _restore_tail(self, cut):
+        """Copy retained fragments and rebuild speech/pause state from their audio."""
+        tail = []
+        for chunk in self._chunks:
+            if cut >= len(chunk):
+                cut -= len(chunk)
+            else:
+                tail.append(chunk[cut:].copy())
+                cut = 0
+        self.reset()
+        for chunk in tail:
+            self._append_chunk(chunk)
 
     @staticmethod
     def find_quietest_cut(audio):
