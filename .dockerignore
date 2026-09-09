@@ -1,9 +1,7 @@
 .venv/
-.env
-.env.*
+.env*
 !.env.example
-**/.env
-**/.env.*
+**/.env*
 !**/.env.example
 transcripts/
 captions/

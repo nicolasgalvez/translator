@@ -1,7 +1,6 @@
 .venv/
 .history/
-.env
-.env.*
+.env*
 !.env.example
 transcripts/
 captions/
