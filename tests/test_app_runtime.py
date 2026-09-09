@@ -1055,12 +1055,280 @@ def test_caption_cancel_during_inflight_read_closes_after_read_returns(
             release.set()
             with pytest.raises(asyncio.CancelledError):
                 await request
+        await asyncio.to_thread(wait_until, lambda: handles[0].stream.closed)
         await asyncio.to_thread(runtime.caption_manager.sweep)
         assert not path.exists()
 
     asyncio.run(exercise())
     assert handles[0].closes == 1
     assert handles[0].stream.closed
+
+
+@pytest.mark.parametrize("shutdown", ["asyncio-run", "closed-loop", "executor-unavailable"])
+def test_caption_abandoned_open_closes_without_event_loop_or_executor(
+    download_runtime, monkeypatch, shutdown,
+):
+    # pylint: disable=too-many-locals,too-many-statements
+    runtime, job_id, path = download_runtime
+    now = [1000.9]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    entered, release = threading.Event(), threading.Event()
+    original_open = Path.open
+    handles = []
+    loop_errors = []
+
+    class ObservedFile:
+        def __init__(self, stream):
+            self.stream = stream
+            self.closes = 0
+
+        def fileno(self):
+            return self.stream.fileno()
+
+        def read(self, size):
+            return self.stream.read(size)
+
+        def close(self):
+            self.closes += 1
+            self.stream.close()
+
+    def blocked_open(candidate, *args, **kwargs):
+        if candidate == path:
+            entered.set()
+            assert release.wait(5)
+        stream = original_open(candidate, *args, **kwargs)  # pylint: disable=consider-using-with
+        if candidate != path:
+            return stream
+        handle = ObservedFile(stream)
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", blocked_open)
+
+    async def await_open():
+        deadline = time.monotonic() + 2
+        while not entered.is_set() and time.monotonic() < deadline:
+            await asyncio.sleep(0.005)
+        assert entered.is_set()
+
+    async def exercise():
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+        request = asyncio.create_task(runtime.captions_download(job_id, path.name))
+        await await_open()
+        if shutdown == "asyncio-run":
+            # Returning triggers cancellation of every task, including the opening operation.
+            timer = threading.Timer(0.1, release.set)
+            timer.start()
+            return
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        stop_executor = asyncio.create_task(loop.shutdown_default_executor())
+        await asyncio.sleep(0)
+        release.set()
+        await stop_executor
+
+    if shutdown == "closed-loop":
+        loop = asyncio.new_event_loop()
+        loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+        loop.create_task(runtime.captions_download(job_id, path.name))
+        try:
+            loop.run_until_complete(await_open())
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        finally:
+            loop.close()
+            release.set()
+    else:
+        asyncio.run(exercise())
+    wait_until(lambda: bool(handles))
+    wait_until(lambda: handles[0].closes == 1)
+    assert handles[0].stream.closed
+    assert runtime.caption_manager._downloads == {}  # pylint: disable=protected-access
+    assert not loop_errors
+    now[0] = 1001
+    runtime.caption_manager.sweep()
+    assert not path.exists()
+
+
+def test_caption_acquisition_handoff_and_abandon_race_has_exactly_one_owner(
+    download_runtime, monkeypatch,
+):
+    # pylint: disable=too-many-locals
+    runtime, job_id, path = download_runtime
+    module = importlib.import_module("caption_jobs")
+    monkeypatch.setattr(time, "time", lambda: 1000.9)
+    original_open = Path.open
+    handles = []
+
+    class ObservedFile:
+        def __init__(self, stream):
+            self.stream = stream
+            self.closes = 0
+
+        def fileno(self):
+            return self.stream.fileno()
+
+        def read(self, size):
+            return self.stream.read(size)
+
+        def close(self):
+            self.closes += 1
+            self.stream.close()
+
+    def observed_open(candidate, *args, **kwargs):
+        stream = original_open(candidate, *args, **kwargs)  # pylint: disable=consider-using-with
+        if candidate != path:
+            return stream
+        handle = ObservedFile(stream)
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", observed_open)
+    for _ in range(50):
+        acquisition = module.CaptionDownloadAcquisition(runtime.caption_manager, job_id, path.name)
+        worker = threading.Thread(target=acquisition.run)
+        worker.start()
+        assert acquisition.ready.wait(1)
+        barrier = threading.Barrier(3)
+        accepted = []
+
+        def accept(barrier=barrier, accepted=accepted, acquisition=acquisition):
+            # pylint: disable=dangerous-default-value
+            barrier.wait()
+            try:
+                accepted.append(acquisition.accept())
+            except RuntimeError:
+                pass  # Abandonment won the same ownership lock.
+
+        def abandon(barrier=barrier, acquisition=acquisition):
+            barrier.wait()
+            acquisition.abandon()
+
+        contenders = [threading.Thread(target=accept), threading.Thread(target=abandon)]
+        for contender in contenders:
+            contender.start()
+        barrier.wait()
+        for contender in contenders:
+            contender.join(1)
+            assert not contender.is_alive()
+        worker.join(1)
+        assert not worker.is_alive()
+        if accepted:
+            assert len(accepted) == 1
+            assert not handles[-1].stream.closed
+            accepted[0].close()
+        assert handles[-1].closes == 1
+        assert handles[-1].stream.closed
+        assert runtime.caption_manager._downloads == {}  # pylint: disable=protected-access
+    assert len(handles) == 50
+
+
+def test_caption_idle_stream_cancel_closes_with_executor_unavailable_without_new_thread(
+    download_runtime, monkeypatch,
+):
+    runtime, job_id, path = download_runtime
+    now = [1000.9]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+
+    async def exercise():
+        response = await runtime.captions_download(job_id, path.name)
+        headers_sent = asyncio.Event()
+
+        async def receive():
+            return {"type": "http.request", "body": b""}
+
+        async def send(_message):
+            headers_sent.set()
+            await asyncio.Event().wait()
+
+        request = asyncio.create_task(response(
+            {"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send,
+        ))
+        await headers_sent.wait()
+        await asyncio.get_running_loop().shutdown_default_executor()
+
+        def cannot_start_thread(_thread):
+            raise AssertionError("Finalization must not create a thread")
+
+        with monkeypatch.context() as context:
+            context.setattr(threading.Thread, "start", cannot_start_thread)
+            request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+        assert response.lease.stream.closed
+        assert runtime.caption_manager._downloads == {}  # pylint: disable=protected-access
+
+    asyncio.run(exercise())
+    now[0] = 1001
+    runtime.caption_manager.sweep()
+    assert not path.exists()
+
+
+def test_caption_lease_read_and_close_races_finalize_once(download_runtime, monkeypatch):
+    # pylint: disable=too-many-locals
+    runtime, job_id, path = download_runtime
+    monkeypatch.setattr(time, "time", lambda: 1000.9)
+    original_open = Path.open
+    handles = []
+
+    class ObservedFile:
+        def __init__(self, stream):
+            self.stream = stream
+            self.closes = 0
+
+        def fileno(self):
+            return self.stream.fileno()
+
+        def read(self, size):
+            time.sleep(0.001)
+            return self.stream.read(size)
+
+        def close(self):
+            self.closes += 1
+            self.stream.close()
+
+    def observed_open(candidate, *args, **kwargs):
+        stream = original_open(candidate, *args, **kwargs)  # pylint: disable=consider-using-with
+        if candidate != path:
+            return stream
+        handle = ObservedFile(stream)
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", observed_open)
+    for _ in range(50):
+        lease = runtime.caption_manager.open_download(job_id, path.name)
+        barrier = threading.Barrier(3)
+        results = queue.Queue()
+
+        def read(lease=lease, barrier=barrier, results=results):
+            barrier.wait()
+            try:
+                results.put(lease.read())
+            except BaseException as error:  # pylint: disable=broad-exception-caught
+                results.put(error)
+
+        def close(lease=lease, barrier=barrier):
+            barrier.wait()
+            lease.close()
+
+        contenders = [threading.Thread(target=read), threading.Thread(target=close)]
+        for contender in contenders:
+            contender.start()
+        barrier.wait()
+        for contender in contenders:
+            contender.join(1)
+            assert not contender.is_alive()
+        assert isinstance(results.get_nowait(), bytes)
+        lease.close()
+        assert handles[-1].closes == 1
+        assert handles[-1].stream.closed
+        assert runtime.caption_manager._downloads == {}  # pylint: disable=protected-access
+    assert len(handles) == 50
 
 
 def test_audio_silence_retains_only_preroll_without_repeated_copying(tmp_path, monkeypatch):

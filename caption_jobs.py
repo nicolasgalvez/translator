@@ -13,8 +13,8 @@ from urllib.parse import quote
 from starlette.responses import StreamingResponse
 
 
-class CaptionDownloadLease:
-    """One open published artifact; reads and finalization share an I/O lock."""
+class CaptionDownloadLease:  # pylint: disable=too-many-instance-attributes
+    """One open artifact; an active reader owns deferred finalization."""
 
     def __init__(self, manager, job_id, stream):
         self.manager = manager
@@ -23,29 +23,53 @@ class CaptionDownloadLease:
         self.size = os.fstat(stream.fileno()).st_size
         self._remaining = self.size
         self._io_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._reading = False
+        self._close_requested = False
         self._closed = False
 
     def read(self):
         with self._io_lock:
-            if self._closed or not self._remaining:
-                return b""
-            chunk = self.stream.read(min(65536, self._remaining))
-            if not chunk:
-                raise OSError("Caption file ended before its advertised length")
-            self._remaining -= len(chunk)
-            return chunk
+            with self._state_lock:
+                if self._closed:
+                    return b""
+                self._reading = True
+            chunk = b""
+            try:
+                if self._remaining:
+                    chunk = self.stream.read(min(65536, self._remaining))
+                    if not chunk:
+                        raise OSError("Caption file ended before its advertised length")
+                    self._remaining -= len(chunk)
+                return chunk
+            finally:
+                with self._state_lock:
+                    self._reading = False
+                    finalize = self._close_requested or not chunk
+                    if finalize:
+                        self._closed = True
+                if finalize:
+                    self._finish_close()
 
     def close(self):
-        with self._io_lock:
+        """Request closure without waiting for an active read or scheduling new work."""
+        with self._state_lock:
             if self._closed:
                 return
+            self._close_requested = True
+            if self._reading:
+                return
             self._closed = True
-            try:
-                self.stream.close()
-            except OSError:
-                logging.exception("Could not close caption download %s", self.job_id)
-            finally:
-                self.manager.release_download(self.job_id)
+        # Idle read-only regular-file closure needs no flush or reader wait.
+        self._finish_close()
+
+    def _finish_close(self):
+        try:
+            self.stream.close()
+        except OSError:
+            logging.exception("Could not close caption download %s", self.job_id)
+        finally:
+            self.manager.release_download(self.job_id)
 
 
 class CaptionDownloadResponse(StreamingResponse):
@@ -68,9 +92,56 @@ class CaptionDownloadResponse(StreamingResponse):
         try:
             await super().__call__(scope, receive, send)
         finally:
-            # A canceled thread-backed read keeps the I/O lock until it returns.
-            # Closing waits off-loop and releases ownership exactly once.
-            await asyncio.shield(asyncio.to_thread(self.lease.close))
+            # An active read worker closes in its own finally; idle closure needs
+            # neither a live executor nor an additional thread.
+            self.lease.close()
+
+
+class CaptionDownloadAcquisition:
+    """The opening worker owns cleanup until an atomic response handoff."""
+
+    def __init__(self, manager, job_id, filename):
+        self._open = lambda: manager.open_download(job_id, filename)
+        self.ready = threading.Event()
+        self._decision = threading.Event()
+        self._lock = threading.Lock()
+        self._lease = None
+        self._error = None
+        self._abandoned = False
+
+    def run(self):
+        try:
+            lease = self._open()
+        except BaseException as error:  # pylint: disable=broad-exception-caught
+            with self._lock:
+                self._error = error
+            self.ready.set()
+            return
+        with self._lock:
+            self._lease = lease
+        self.ready.set()
+        # The same worker can finalize even after its asyncio task, loop, and
+        # executor stop accepting work. No result callback owns the resource.
+        self._decision.wait()
+        with self._lock:
+            lease, self._lease = self._lease, None
+        if lease is not None:
+            lease.close()
+
+    def accept(self):
+        with self._lock:
+            if self._error is not None:
+                raise self._error
+            if self._abandoned:
+                raise RuntimeError("Caption download acquisition was abandoned")
+            lease, self._lease = self._lease, None
+            self._decision.set()
+            return lease
+
+    def abandon(self):
+        with self._lock:
+            self._abandoned = True
+            self._decision.set()
 
 
 class CaptionJobManager:  # pylint: disable=too-many-instance-attributes
@@ -176,23 +247,20 @@ class CaptionJobManager:  # pylint: disable=too-many-instance-attributes
                 del self._downloads[job_id]
 
     async def download_response(self, job_id, filename):
-        operation = asyncio.create_task(asyncio.to_thread(self.open_download, job_id, filename))
+        acquisition = CaptionDownloadAcquisition(self, job_id, filename)
+        operation = asyncio.create_task(asyncio.to_thread(acquisition.run))
         try:
-            lease = await asyncio.shield(operation)
+            # Poll only the in-memory handoff flag. Waiting in another executor
+            # worker could deadlock a full pool whose openers await handoff.
+            while not acquisition.ready.is_set():
+                if operation.done():
+                    operation.result()  # Surface executor submission failure or cancellation.
+                await asyncio.sleep(0.005)
+            lease = acquisition.accept()
         except BaseException:
-            # The opening thread may finish after request cancellation. Its result
-            # still has an owner that closes it without blocking the event loop.
-            operation.add_done_callback(self._close_abandoned_download)
+            acquisition.abandon()
             raise
         return CaptionDownloadResponse(lease, filename)
-
-    @staticmethod
-    def _close_abandoned_download(operation):
-        try:
-            lease = operation.result()
-        except BaseException:  # pylint: disable=broad-exception-caught
-            return
-        asyncio.get_running_loop().run_in_executor(None, lease.close)
 
     def stop(self):
         with self._lock:
