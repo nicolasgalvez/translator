@@ -44,6 +44,146 @@ def wait_until(predicate):
     assert predicate()
 
 
+def write_wav(path, *, sample_rate=16000, channels=1, sample_width=2, frames=b"\x00\x00"):
+    """Write a tiny PCM WAV with controlled metadata for runtime boundary tests."""
+    with wave.Wave_write(str(path)) as wav_file:
+        wav_file.setframerate(sample_rate)
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(sample_width)
+        wav_file.writeframes(frames)
+
+
+def test_load_audio_rejects_wrong_sample_rate(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    path = tmp_path / "wrong-rate.wav"
+    write_wav(path, sample_rate=8000)
+
+    with pytest.raises(ValueError, match="sample rate.*8000.*16000"):
+        module.TranslatorRuntime(module.RuntimeConfig.from_environment({})).load_audio_16k(path)
+
+
+def test_load_audio_rejects_wrong_channel_count(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    path = tmp_path / "stereo.wav"
+    write_wav(path, channels=2, frames=b"\x00\x00\x00\x00")
+
+    with pytest.raises(ValueError, match="channels.*2.*1"):
+        module.TranslatorRuntime(module.RuntimeConfig.from_environment({})).load_audio_16k(path)
+
+
+def test_load_audio_rejects_wrong_sample_width(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    path = tmp_path / "eight-bit.wav"
+    write_wav(path, sample_width=1, frames=b"\x00")
+
+    with pytest.raises(ValueError, match="sample width.*1.*2"):
+        module.TranslatorRuntime(module.RuntimeConfig.from_environment({})).load_audio_16k(path)
+
+
+def test_load_audio_rejects_invalid_metadata_under_optimized_python(tmp_path):
+    path = tmp_path / "optimized-invalid.wav"
+    write_wav(path, sample_rate=8000, channels=2, frames=b"\x00\x00\x00\x00")
+    script = """
+import sys
+from pathlib import Path
+import translator_runtime
+
+runtime = translator_runtime.TranslatorRuntime(
+    translator_runtime.RuntimeConfig.from_environment({}),
+)
+try:
+    runtime.load_audio_16k(Path(sys.argv[1]))
+except translator_runtime.InvalidAudioMetadataError as error:
+    if "sample rate" not in str(error) or "8000" not in str(error):
+        raise SystemExit(f"unexpected validation error: {error}")
+else:
+    raise SystemExit("invalid metadata was accepted")
+"""
+    environment = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]))
+    result = subprocess.run(
+        [sys.executable, "-O", "-c", script, str(path)],
+        env=environment, capture_output=True, text=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_load_audio_decodes_valid_pcm_as_float32(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    path = tmp_path / "valid.wav"
+    write_wav(path, frames=b"\x01\x00\xff\x7f\xff\x7f")
+
+    audio = module.TranslatorRuntime(module.RuntimeConfig.from_environment({})).load_audio_16k(path)
+
+    np.testing.assert_array_equal(audio, np.array([1 / 32767, 1, 1], dtype=np.float32))
+    assert audio.dtype == np.float32
+
+
+def test_load_audio_rejects_trailing_partial_pcm_frame(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    path = tmp_path / "partial-frame.wav"
+    write_wav(path, frames=b"\x01\x00\x02")
+
+    with pytest.raises(module.InvalidAudioMetadataError, match="frame data.*3.*2"):
+        module.TranslatorRuntime(module.RuntimeConfig.from_environment({})).load_audio_16k(path)
+
+
+def test_load_audio_rejects_partial_pcm_frame_under_optimized_python(tmp_path):
+    path = tmp_path / "optimized-partial-frame.wav"
+    write_wav(path, frames=b"\x01\x00\x02")
+    script = """
+import sys
+from pathlib import Path
+import translator_runtime
+
+runtime = translator_runtime.TranslatorRuntime(
+    translator_runtime.RuntimeConfig.from_environment({}),
+)
+try:
+    runtime.load_audio_16k(Path(sys.argv[1]))
+except translator_runtime.InvalidAudioMetadataError as error:
+    if "frame data" not in str(error):
+        raise SystemExit(f"unexpected validation error: {error}")
+else:
+    raise SystemExit("partial PCM frame was accepted")
+"""
+    environment = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]))
+    result = subprocess.run(
+        [sys.executable, "-O", "-c", script, str(path)],
+        env=environment, capture_output=True, text=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_caption_worker_rejects_partial_pcm_frame_before_transcription(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    transcribed = []
+
+    class CaptionRuntime(module.TranslatorRuntime):
+        def extract_audio_16k(self, _video_path, audio_path):
+            write_wav(audio_path, frames=b"\x01\x00\x02")
+
+        def transcribe_segments(self, *_args):
+            transcribed.append(True)
+            raise AssertionError("transcription should not be called")
+
+    runtime = CaptionRuntime(module.RuntimeConfig.from_environment({}))
+    runtime.captions_dir = tmp_path
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video_path = job_dir / "video.mp4"
+    video_path.write_bytes(b"video")
+    runtime.caption_jobs["job"] = {"status": "queued", "files": []}
+
+    runtime.caption_worker("job", video_path)
+
+    job = runtime.caption_jobs["job"]
+    assert job["status"] == "error"
+    assert "frame data" in job["message"]
+    assert not transcribed
+
+
 @pytest.mark.parametrize("setting", ["CONCURRENCY", "QUEUE_CAPACITY", "RETENTION_SECONDS"])
 @pytest.mark.parametrize("value", ["0", "-1", "1.5", "bad", ""])
 def test_caption_lifecycle_configuration_rejects_invalid_values(setting, value):
