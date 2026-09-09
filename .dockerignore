@@ -1,5 +1,10 @@
 .venv/
+.env*
+!.env.example
+**/.env*
+!**/.env.example
 transcripts/
+captions/
 __pycache__/
 *.pyc
 frontend/node_modules/
