@@ -1369,6 +1369,67 @@ def test_audio_silence_retains_only_preroll_without_repeated_copying(tmp_path, m
         asyncio.run(runtime.stop())
 
 
+def test_audio_capture_read_failure_is_terminal_without_output(tmp_path, capsys):
+    module = importlib.import_module("translator_runtime")
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+
+    class FailedStream:  # pylint: disable=too-few-public-methods
+        reads = 0
+
+        def read(self, _frames):
+            self.reads += 1
+            if self.reads > 1:
+                runtime._stopping.set()  # pylint: disable=protected-access
+            raise OSError("input disconnected")
+
+    runtime.audio_stream = FailedStream()
+    audio_file = tmp_path / "capture.wav"
+    with wave.Wave_write(str(audio_file)) as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(48000)
+        runtime.wav_writer = writer
+        runtime.audio_capture_loop()
+
+    assert runtime.audio_stream.reads == 1
+    assert not runtime._stopping.is_set()  # pylint: disable=protected-access
+    assert runtime.audio_chunk_queue.empty()
+    assert capsys.readouterr().out.count("Audio capture error: input disconnected") == 1
+    with wave.open(str(audio_file), "rb") as recording:
+        assert recording.getnframes() == 0
+
+
+def test_audio_capture_write_failure_is_terminal_without_queueing(capsys):
+    module = importlib.import_module("translator_runtime")
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+
+    class Stream:  # pylint: disable=too-few-public-methods
+        reads = 0
+
+        def read(self, frames):
+            self.reads += 1
+            if self.reads > 1:
+                runtime._stopping.set()  # pylint: disable=protected-access
+            return np.zeros((frames, 1), dtype="float32"), False
+
+    class FailedWriter:  # pylint: disable=too-few-public-methods
+        writes = 0
+
+        def writeframes(self, _frames):
+            self.writes += 1
+            raise OSError("recording unavailable")
+
+    runtime.audio_stream = Stream()
+    runtime.wav_writer = FailedWriter()
+    runtime.audio_capture_loop()
+
+    assert runtime.audio_stream.reads == 1
+    assert runtime.wav_writer.writes == 1
+    assert not runtime._stopping.is_set()  # pylint: disable=protected-access
+    assert runtime.audio_chunk_queue.empty()
+    assert capsys.readouterr().out.count("Audio capture error: recording unavailable") == 1
+
+
 def test_audio_capture_overload_keeps_recent_chunks_and_reports_drops(tmp_path, caplog):
     module = importlib.import_module("translator_runtime")
     runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
@@ -2614,6 +2675,7 @@ def test_runtime_shutdown_closes_owned_resources(
             assert (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) == (
                 1, 2, 48000,
             )
+        assert "Audio capture error:" not in capsys.readouterr().out
         if not broadcast_failure:
             await runtime.stop()
 

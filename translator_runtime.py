@@ -311,6 +311,7 @@ class TranslatorRuntime:
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 if not self._stopping.is_set():
                     print(f"Audio capture error: {exc}", flush=True)
+                break
 
     def audio_process_loop(self):
         """Split capture promptly even while the backend is still transcribing."""
