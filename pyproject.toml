@@ -33,6 +33,9 @@ cuda = ["torch; sys_platform == 'linux'"]
 
 [dependency-groups]
 dev = ["pytest", "pylint", "pre-commit"]
+# Exercise HTTP routes and audio processing with fake hardware/backends in CI.
+# Keep model engines, Torch, and PortAudio out of this environment.
+app-test = ["fastapi", "httpx", "jinja2", "python-multipart", "numpy", "scipy"]
 
 [tool.uv]
 # `environments`, not `required-environments`: the latter demands wheels exist
