@@ -1,6 +1,6 @@
 # Live Transcriber
 
-Real-time transcription app that captures system audio, transcribes with Whisper, saves live transcript sessions, and exposes backend/frontend plugin hooks for reacting to transcript events. The live UI is a React/Tailwind app with a resizable transcript pane and a main plugin-output pane.
+Real-time transcription app that captures an audio input, transcribes with Whisper, saves live transcript sessions, and exposes backend/frontend plugin hooks for reacting to transcript events. The live UI is a React/Tailwind app with a resizable transcript pane and a main plugin-output pane.
 
 The existing video captions tool is still available at `/captions`.
 
@@ -29,16 +29,22 @@ Required for the video captions feature.
 brew install ffmpeg
 ```
 
-### BlackHole on macOS
+### Audio input on macOS
 
-The transcriber captures system audio through [BlackHole](https://existential.audio/blackhole/), a virtual audio loopback driver.
+By default, the transcriber uses the system's default microphone, selected in
+System Settings → Sound → Input. Mono microphones are supported. Grant microphone
+access to your terminal app when macOS prompts, or enable it in System Settings →
+Privacy & Security → Microphone and restart the terminal if necessary.
+
+To capture system audio, install [BlackHole](https://existential.audio/blackhole/),
+a virtual audio loopback driver:
 
 1. Install BlackHole 2ch:
    ```bash
    brew install blackhole-2ch
    ```
 2. Create a Multi-Output Device in Audio MIDI Setup so you can hear audio and capture it through BlackHole.
-3. Grant microphone access to your terminal app in System Settings.
+3. Start with `./run.sh --device "BlackHole 2ch"`.
 
 ## Quick Start
 
@@ -47,6 +53,12 @@ The transcriber captures system audio through [BlackHole](https://existential.au
 ```
 
 First run creates a Python virtual environment, installs Python dependencies, installs frontend dependencies, builds the React app, and starts FastAPI at `http://localhost:8765`.
+
+`./run.sh` captures the default microphone. Use `--device "NAME"` to select a
+different input (or `TRANSLATOR_DEVICE=NAME` when running `app.py` directly).
+Names match without regard to case; an exact name takes priority, and a unique
+substring is accepted. Ambiguous or unavailable selections report the available
+input devices. Startup prints the selected name and index.
 
 ### Frontend Dev Server
 
@@ -63,6 +75,7 @@ This starts Vite at `http://127.0.0.1:5173` and FastAPI at `http://localhost:876
 ./run.sh --port 9000
 ./run.sh --host 0.0.0.0
 ./run.sh --device "MacBook Pro Microphone"
+./run.sh --device "BlackHole 2ch"
 ./run.sh --backend mlx-whisper
 ./run.sh --skip-frontend-build
 ```
@@ -105,7 +118,7 @@ Frontend plugins register transcript filters and main-pane renderers through `fr
 
 ### Live Transcriber (`/`)
 
-Captures system audio in real time, transcribes Spanish with Whisper, saves transcript JSONL entries, and broadcasts transcript events to the React UI.
+Captures the selected audio input in real time, transcribes Spanish with Whisper, saves transcript JSONL entries, and broadcasts transcript events to the React UI.
 
 Capture, chunking, and inference run in separate workers. Live audio buffering has
 fixed limits at 48 kHz mono float32:

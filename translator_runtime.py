@@ -21,6 +21,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
+from audio_devices import AudioDeviceSelector
 from audio_pipeline import (
     SAMPLE_RATE, CAPTURE_CHUNK, CAPTURE_QUEUE_CAPACITY, UTTERANCE_QUEUE_CAPACITY,
     DropOldestQueue, UtteranceChunker,
@@ -59,7 +60,7 @@ class RuntimeConfig:  # pylint: disable=too-many-instance-attributes
         values = {}
         for name, default in (
             ("HOST", "127.0.0.1"), ("MODEL", "small"),
-            ("DEVICE", "BlackHole 2ch"), ("BACKEND", "faster-whisper"),
+            ("DEVICE", "default"), ("BACKEND", "faster-whisper"),
         ):
             value = environ.get(f"TRANSLATOR_{name}", default)
             if not value.strip():
@@ -152,7 +153,6 @@ class TranslatorRuntime:
         self._started = True
         try:
             self.device_index = self.find_input_device(self.config.device_name)
-            print(f"Using audio device: {self.config.device_name} (index {self.device_index})")
             self.backend = get_backend(self.config.backend_name, self.config.model)
             print(f"Backend ready: {self.backend.name}", flush=True)
             loaded_plugins = load_plugins()
@@ -257,13 +257,20 @@ class TranslatorRuntime:
             yield not self._stopping.is_set()
 
     def find_input_device(self, name: str) -> int:
-        """Return the index of the first stereo-capable input device matching `name`."""
+        """Discover inputs and resolve the requested name or configured default."""
         import sounddevice as sd
 
-        for idx, device in enumerate(sd.query_devices()):
-            if name in device["name"] and device["max_input_channels"] >= 2:
-                return idx
-        raise RuntimeError(f"Could not find '{name}' input device")
+        devices = sd.query_devices()
+        default_input = None
+        if name.strip().casefold() == "default":
+            try:
+                default_input = sd.default.device[0]
+            except (AttributeError, IndexError, TypeError):
+                pass
+        selector = AudioDeviceSelector(devices, default_input)
+        index = selector.select(name)
+        print(f"Using audio device: {devices[index]['name']} (index {index})", flush=True)
+        return index
 
     def load_audio_16k(self, path: Path) -> np.ndarray:
         """Load mono 16kHz float32 audio extracted by the captions pipeline."""
