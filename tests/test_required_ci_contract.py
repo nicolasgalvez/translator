@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -43,6 +44,44 @@ def test_required_workflow_runs_from_the_trusted_base_for_every_pull_request():
     assert "id-token:" not in workflow
     assert "secrets: inherit" not in workflow
     assert "write" not in workflow_permissions
+
+
+def test_release_workflow_uses_a_protected_deploy_key_push_for_required_ci():
+    workflow = read_workflow("release-please.yml")
+    trigger = workflow.split("permissions:", maxsplit=1)[0]
+    workflow_permissions = workflow.split("jobs:", maxsplit=1)[0]
+
+    assert "  repository_dispatch:" in trigger
+    assert "types: [release-retry]" in trigger
+    assert "workflow_dispatch" not in trigger
+    assert "actions: write" not in workflow_permissions
+    assert "steps.release.outputs.pr" in workflow
+    assert "headBranchName" in workflow
+    assert "environment: release-automation" in workflow
+    assert "persist-credentials: false" in workflow
+    assert "ssh-key:" not in workflow
+    assert "RELEASE_AUTOMATION_SSH_KEY: ${{ secrets.RELEASE_AUTOMATION_SSH_KEY }}" in workflow
+    assert ': "${RELEASE_AUTOMATION_SSH_KEY:?' in workflow
+    assert "git commit --allow-empty" in workflow
+    assert "git push" in workflow
+    assert workflow.count("git push") == 1
+    assert workflow.rstrip().endswith(
+        'git push origin "HEAD:refs/heads/$RELEASE_BRANCH"'
+    )
+    assert "gh workflow run" not in workflow
+    assert workflow.index("uv lock") < workflow.index("RELEASE_AUTOMATION_SSH_KEY")
+    assert workflow.index("RELEASE_AUTOMATION_SSH_KEY") < workflow.index("git push")
+
+
+def test_release_workflow_pins_every_action_allowed_to_write_the_repository():
+    workflow = read_workflow("release-please.yml")
+    action_references = re.findall(r"^\s*- uses: ([^\s#]+)", workflow, re.MULTILINE)
+
+    assert action_references == [
+        "googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7",
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78",
+    ]
 
 
 def test_classifier_uses_the_exact_pull_request_range_and_nul_paths():
@@ -317,6 +356,21 @@ def test_no_workflow_can_write_checks():
         )
 
     assert not grants
+
+
+def test_only_release_workflow_can_write_repository_content_or_actions():
+    grants = []
+    for workflow_path in WORKFLOW_PATHS:
+        workflow = workflow_path.read_text(encoding="utf-8")
+        for permission in ("actions: write", "contents: write"):
+            grants.extend(
+                (workflow_path.name, permission)
+                for _ in range(workflow.count(permission))
+            )
+
+    assert grants == [
+        ("release-please.yml", "contents: write"),
+    ]
 
 
 def test_versioned_ruleset_protects_the_default_branch_without_bypass():
