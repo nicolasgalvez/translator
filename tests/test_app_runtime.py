@@ -1,6 +1,7 @@
 """Runtime boundaries: import, configuration, application lifecycle, and cleanup."""
 
 import asyncio
+import gc
 import importlib
 import json
 import os
@@ -10,10 +11,13 @@ import sys
 import threading
 from types import SimpleNamespace
 import wave
+import weakref
 
 import pytest
 import httpx
 import numpy as np
+
+from hooks import add_action, add_filter, clear_hooks
 
 
 @pytest.mark.parametrize("language", ["es", "invalid-language"])
@@ -199,21 +203,149 @@ def test_shutdown_discards_an_inflight_transcription(tmp_path):
     async def exercise():
         runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
         runtime.backend = SlowBackend()
+        backend_reference = weakref.ref(runtime.backend)
         runtime.transcript_file = tmp_path / "session.jsonl"
         for amplitude in (0.1, 0, 0):
             runtime.audio_chunk_queue.put(np.full(12000, amplitude, dtype="float32"))
         worker = threading.Thread(target=runtime.audio_process_loop)
         runtime.worker_threads.append(worker)
         worker.start()
+        stopped = False
         try:
             assert await asyncio.to_thread(entered.wait, 2)
             await asyncio.wait_for(runtime.stop(), timeout=3)
+            stopped = True
+            assert backend_reference() is not None
         finally:
             release.set()
-            await runtime.stop()
+            if not stopped:
+                await runtime.stop()
             await asyncio.to_thread(worker.join, 2)
         assert not worker.is_alive()
+        gc.collect()
+        assert backend_reference() is None
         assert not runtime.transcript_file.exists()
+        assert runtime.text_queue.empty()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("hook_name", [
+    "transcript.before_save", "transcript.after_save", "transcript.before_render",
+])
+def test_shutdown_blocks_output_after_an_overdue_transcript_callback(tmp_path, hook_name):
+    importlib.import_module("scipy.signal")
+    module = importlib.import_module("translator_runtime")
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Backend:  # pylint: disable=too-few-public-methods
+        name = "fixture"
+
+        def transcribe(self, *_args, **_kwargs):
+            return [SimpleNamespace(text="must not be committed after stop")], "es"
+
+    def paused_callback(event, _context):
+        entered.set()
+        assert release.wait(10)
+        return event
+
+    async def exercise():
+        runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+        runtime.backend = Backend()
+        runtime.transcript_file = tmp_path / "session.jsonl"
+        for amplitude in (0.1, 0, 0):
+            runtime.audio_chunk_queue.put(np.full(12000, amplitude, dtype="float32"))
+        worker = threading.Thread(target=runtime.audio_process_loop)
+        runtime.worker_threads.append(worker)
+        worker.start()
+        stopped = False
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            await asyncio.wait_for(runtime.stop(), timeout=3)
+            stopped = True
+            saved_at_shutdown = (
+                runtime.transcript_file.read_bytes() if runtime.transcript_file.exists() else None
+            )
+            assert runtime.text_queue.empty()
+        finally:
+            release.set()
+            if not stopped:
+                await runtime.stop()
+            await asyncio.to_thread(worker.join, 2)
+        assert not worker.is_alive()
+        saved_after_callback = (
+            runtime.transcript_file.read_bytes() if runtime.transcript_file.exists() else None
+        )
+        assert saved_after_callback == saved_at_shutdown
+        if hook_name == "transcript.before_save":
+            assert saved_after_callback is None
+        else:
+            assert saved_after_callback is not None
+        assert runtime.text_queue.empty()
+
+    clear_hooks()
+    register = add_action if hook_name == "transcript.after_save" else add_filter
+    register(hook_name, paused_callback)
+    try:
+        asyncio.run(exercise())
+    finally:
+        clear_hooks()
+
+
+def test_shutdown_waits_for_a_transcript_file_commit(tmp_path, monkeypatch):
+    importlib.import_module("scipy.signal")
+    module = importlib.import_module("translator_runtime")
+    events_module = importlib.import_module("transcript_events")
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Backend:  # pylint: disable=too-few-public-methods
+        name = "fixture"
+
+        def transcribe(self, *_args, **_kwargs):
+            return [SimpleNamespace(text="commit started before stop")], "es"
+
+    class PausedFile:
+        def __init__(self, path, mode, *, encoding):
+            # This context manager closes the file in __exit__.
+            self.file = open(path, mode, encoding=encoding)  # pylint: disable=consider-using-with
+
+        def __enter__(self):
+            entered.set()
+            assert release.wait(10)
+            return self.file
+
+        def __exit__(self, *_args):
+            self.file.close()
+
+    monkeypatch.setattr(events_module, "open", PausedFile, raising=False)
+
+    async def exercise():
+        runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+        runtime.backend = Backend()
+        runtime.transcript_file = tmp_path / "session.jsonl"
+        for amplitude in (0.1, 0, 0):
+            runtime.audio_chunk_queue.put(np.full(12000, amplitude, dtype="float32"))
+        worker = threading.Thread(target=runtime.audio_process_loop)
+        runtime.worker_threads.append(worker)
+        worker.start()
+        shutdown = None
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            shutdown = asyncio.create_task(runtime.stop())
+            await asyncio.sleep(2.2)
+            assert not shutdown.done()
+        finally:
+            release.set()
+            if shutdown is None:
+                shutdown = asyncio.create_task(runtime.stop())
+            await asyncio.wait_for(shutdown, 3)
+            saved_at_shutdown = runtime.transcript_file.read_bytes()
+            await asyncio.to_thread(worker.join, 2)
+        assert not worker.is_alive()
+        assert runtime.transcript_file.read_bytes() == saved_at_shutdown
+        assert json.loads(saved_at_shutdown)["text"] == "commit started before stop"
         assert runtime.text_queue.empty()
 
     asyncio.run(exercise())
@@ -287,12 +419,15 @@ def test_caption_worker_stops_after_inflight_backend_returns(tmp_path):
         )
         runtime.worker_threads.append(worker)
         worker.start()
+        stopped = False
         try:
             assert await asyncio.to_thread(entered.wait, 2)
             await asyncio.wait_for(runtime.stop(), 3)
+            stopped = True
         finally:
             release.set()
-            await runtime.stop()
+            if not stopped:
+                await runtime.stop()
             await asyncio.to_thread(worker.join, 2)
         assert not worker.is_alive()
         assert runtime.caption_jobs["job"]["status"] == "error"

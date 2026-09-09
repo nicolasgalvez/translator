@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 import wave
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -90,6 +90,7 @@ class TranslatorRuntime:
         self.text_queue: queue.Queue[dict] = queue.Queue()
         self.audio_chunk_queue: queue.Queue[np.ndarray] = queue.Queue()
         self.wav_lock = threading.Lock()
+        self._transcript_commit_lock = threading.Lock()
         self._stopping = threading.Event()
         self.device_index = None
         self.backend = None
@@ -144,6 +145,7 @@ class TranslatorRuntime:
     async def stop(self):
         """Signal workers and bound joins so an external inference cannot hang shutdown."""
         self._stopping.set()
+        await asyncio.to_thread(self._wait_for_transcript_commit)
         if self.broadcast_task is not None:
             self.broadcast_task.cancel()
             try:
@@ -156,8 +158,8 @@ class TranslatorRuntime:
             with suppress(Exception):
                 self.audio_stream.abort()
         await asyncio.to_thread(self._join_workers)
-        if not any(worker.is_alive() for worker in self.worker_threads):
-            self.backend = None
+        # In-flight operations retain local references until they return.
+        self.backend = None
         if self.audio_stream is not None:
             with suppress(Exception):
                 self.audio_stream.close()
@@ -181,6 +183,16 @@ class TranslatorRuntime:
     def _check_running(self):
         if self._stopping.is_set():
             raise RuntimeError("Runtime stopped")
+
+    def _wait_for_transcript_commit(self):
+        """Drain a write already in progress; callbacks never hold this lock."""
+        with self._transcript_commit_lock:
+            pass
+
+    @contextmanager
+    def _transcript_commit(self):
+        with self._transcript_commit_lock:
+            yield not self._stopping.is_set()
 
     def find_input_device(self, name: str) -> int:
         """Return the index of the first stereo-capable input device matching `name`."""
@@ -310,17 +322,24 @@ class TranslatorRuntime:
         import numpy as np
         from scipy.signal import resample_poly
 
+        backend = self.backend
+        if self._stopping.is_set():
+            return
         audio_16k = resample_poly(audio, 1, 3).astype(np.float32)
-        segments, _ = self.backend.transcribe(
+        segments, _ = backend.transcribe(
             audio_16k, language=self.config.language.code, beam_size=1,
         )
         text = self.extract_text(segments)
         if self._stopping.is_set():
             return
-        context = {"backend": self.backend.name, "model": self.config.model}
-        entry = process_transcript_text(text, self.transcript_file, context=context)
+        context = {"backend": backend.name, "model": self.config.model}
+        entry = process_transcript_text(
+            text, self.transcript_file, context=context, commit_guard=self._transcript_commit,
+        )
         if entry:
-            queue_transcript_render_event(entry, self.text_queue, context=context)
+            queue_transcript_render_event(
+                entry, self.text_queue, context=context, commit_guard=self._transcript_commit,
+            )
 
     async def broadcast_loop(self):
         while True:
@@ -466,6 +485,7 @@ class TranslatorRuntime:
     def label_segment_languages(self, segments: list[dict], audio_array: np.ndarray,
                                 detected_lang: str, job: dict) -> None:
         """Set each segment's "language" by detecting on that segment's own audio slice."""
+        backend = self.backend
         for i, seg in enumerate(segments):
             self._check_running()
             start_sample = int(seg["start"] * 16000)
@@ -477,7 +497,7 @@ class TranslatorRuntime:
                 # Too short — fall back to file-level detection
                 seg["language"] = detected_lang
             else:
-                lang, _ = self.backend.detect_language(audio_slice)
+                lang, _ = backend.detect_language(audio_slice)
                 seg["language"] = lang
 
             if (i + 1) % 10 == 0:
@@ -516,7 +536,9 @@ class TranslatorRuntime:
 
     def transcribe_segments(self, audio_array: np.ndarray, job: dict) -> tuple[list[dict], str]:
         """Transcribe a whole file. Returns (segment dicts, file-level detected language)."""
-        segments_raw, detected_lang = self.backend.transcribe(
+        backend = self.backend
+        self._check_running()
+        segments_raw, detected_lang = backend.transcribe(
             audio_array, beam_size=5, vad_filter=True,
         )
         segments = [
