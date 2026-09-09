@@ -14,6 +14,7 @@ dependencies = [
     "faster-whisper",
     "python-multipart",
     "argostranslate",
+    "stanza>=1.12.2",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +39,10 @@ dev = ["pytest", "pylint", "pre-commit"]
 app-test = ["fastapi", "httpx", "jinja2", "python-multipart", "numpy", "scipy"]
 
 [tool.uv]
+# Argos Translate 1.11.0 pins vulnerable Stanza 1.10.1. Remove this one
+# override after a published Argos Translate release no longer pins Stanza
+# 1.10.1 and permits Stanza 1.12.2 or newer.
+override-dependencies = ["stanza>=1.12.2"]
 # `environments`, not `required-environments`: the latter demands wheels exist
 # for every listed environment, which drags the cuda extra onto macOS arm64 and
 # fails with a message about torch lacking arm64 wheels — misleading, since the

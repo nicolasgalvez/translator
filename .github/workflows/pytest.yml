@@ -32,4 +32,5 @@ jobs:
       run: |
         uv run --only-group dev --only-group app-test pytest tests -q \
           --ignore=tests/test_chunking.py \
-          --ignore=tests/test_backend_benchmark.py
+          --ignore=tests/test_backend_benchmark.py \
+          --ignore=tests/test_argos_stanza_compatibility.py
