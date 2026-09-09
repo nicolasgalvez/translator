@@ -4,7 +4,7 @@ from contextlib import suppress
 
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
-from starlette._utils import get_route_path
+from starlette.routing import Match
 
 
 class UploadRequestTooLargeError(HTTPException):
@@ -29,9 +29,18 @@ class CaptionUploadLimitMiddleware:  # pylint: disable=too-few-public-methods
     def __init__(self, app):
         self.app = app
 
+    @staticmethod
+    def _matches_upload_route(scope):
+        """Use the router's first full match, including its compiled path semantics."""
+        for route in scope["app"].router.routes:
+            match, _child_scope = route.matches(scope)
+            if match == Match.FULL:
+                return getattr(route, "path", None) == "/captions/upload"
+        return False
+
     async def __call__(self, scope, receive, send):
         if (scope["type"] != "http" or scope["method"] != "POST"
-                or get_route_path(scope) != "/captions/upload"):
+                or not self._matches_upload_route(scope)):
             await self.app(scope, receive, send)
             return
 

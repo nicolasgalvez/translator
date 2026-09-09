@@ -233,14 +233,17 @@ def test_upload_checks_size_before_writing_and_closes_rejection(upload_runtime, 
 
 @pytest.mark.parametrize("content_length", [None, "1", "1000000000"])
 @pytest.mark.parametrize("deployment_prefix", ["", "/api"], ids=["root", "prefixed"])
+@pytest.mark.parametrize("encoded_suffix", ["", "%0A"], ids=["canonical", "encoded-newline"])
 def test_upload_request_limit_stops_multipart_spooling(
-    upload_runtime, monkeypatch, content_length, deployment_prefix,
+    upload_runtime, monkeypatch, content_length, deployment_prefix, encoded_suffix,
 ):
     runtime, entered, _inputs = upload_runtime
     application = importlib.import_module("app").create_app()
     application.state.runtime = runtime
     parser_module = importlib.import_module("starlette.formparsers")
-    observed = SimpleNamespace(spools=[], consumed=0, handler_entered=False)
+    observed = SimpleNamespace(
+        spools=[], consumed=0, handler_entered=False, original_upload=runtime.captions_upload,
+    )
 
     class ObservedSpool(parser_module.SpooledTemporaryFile):
         # pylint: disable=too-few-public-methods
@@ -255,11 +258,9 @@ def test_upload_request_limit_stops_multipart_spooling(
             super().close()
 
     monkeypatch.setattr(parser_module, "SpooledTemporaryFile", ObservedSpool)
-    original_upload = runtime.captions_upload
-
     async def observe_handler(file):
         observed.handler_entered = True
-        return await original_upload(file)
+        return await observed.original_upload(file)
 
     monkeypatch.setattr(runtime, "captions_upload", observe_handler)
 
@@ -280,7 +281,8 @@ def test_upload_request_limit_stops_multipart_spooling(
             base_url="http://test",
         ) as client:
             response = await client.post(
-                f"{deployment_prefix}/captions/upload", headers=headers, content=multipart_body(),
+                f"{deployment_prefix}/captions/upload{encoded_suffix}",
+                headers=headers, content=multipart_body(),
             )
         assert response.status_code == 413
         assert response.json() == {"error": "Upload exceeds maximum size of 1048579 bytes"}
