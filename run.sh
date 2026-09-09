@@ -43,20 +43,44 @@ usage() {
     echo "  $0 --port 9000 --model medium"
 }
 
+is_launcher_option() {
+    case $1 in
+        -H|--host|-p|--port|-m|--model|-d|--device|-b|--backend|-l|--language|\
+        --frontend-dev|--skip-frontend-build|-h|--help) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+require_option_value() {
+    if [ "$#" -lt 2 ] || is_launcher_option "$2"; then
+        echo "translator: $1 requires a value" >&2
+        exit 2
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
     case $1 in
-        -H|--host)   HOST="$2"; shift 2 ;;
-        -p|--port)   PORT="$2"; shift 2 ;;
-        -m|--model)  MODEL="$2"; shift 2 ;;
-        -d|--device) DEVICE="$2"; shift 2 ;;
-        -b|--backend) BACKEND="$2"; shift 2 ;;
-        -l|--language) LANGUAGE="$2"; shift 2 ;;
+        -H|--host)   require_option_value "$@"; HOST="$2"; shift 2 ;;
+        -p|--port)   require_option_value "$@"; PORT="$2"; shift 2 ;;
+        -m|--model)  require_option_value "$@"; MODEL="$2"; shift 2 ;;
+        -d|--device) require_option_value "$@"; DEVICE="$2"; shift 2 ;;
+        -b|--backend) require_option_value "$@"; BACKEND="$2"; shift 2 ;;
+        -l|--language) require_option_value "$@"; LANGUAGE="$2"; shift 2 ;;
         --frontend-dev) FRONTEND_DEV=1; shift ;;
         --skip-frontend-build) SKIP_FRONTEND_BUILD=1; shift ;;
         -h|--help)   usage; exit 0 ;;
         *) echo "Unknown option: $1"; usage; exit 1 ;;
     esac
 done
+
+export TRANSLATOR_HOST="$HOST"
+export TRANSLATOR_PORT="$PORT"
+export TRANSLATOR_MODEL="$MODEL"
+export TRANSLATOR_DEVICE="$DEVICE"
+export TRANSLATOR_BACKEND="$BACKEND"
+export TRANSLATOR_LANGUAGE="$LANGUAGE"
+
+python3 "$SCRIPT_DIR/scripts/validate_runtime_config.py"
 
 if [ -f "$SCRIPT_DIR/frontend/package.json" ]; then
     if ! command -v node >/dev/null 2>&1; then
@@ -128,13 +152,6 @@ if [ -f "$SCRIPT_DIR/frontend/package.json" ]; then
         echo "Frontend up to date - skipping build."
     fi
 fi
-
-export TRANSLATOR_HOST="$HOST"
-export TRANSLATOR_PORT="$PORT"
-export TRANSLATOR_MODEL="$MODEL"
-export TRANSLATOR_DEVICE="$DEVICE"
-export TRANSLATOR_BACKEND="$BACKEND"
-export TRANSLATOR_LANGUAGE="$LANGUAGE"
 
 echo "Starting transcriber (host=$HOST, port=$PORT, model=$MODEL, device=$DEVICE, backend=$BACKEND, language=$LANGUAGE)"
 cd "$SCRIPT_DIR"

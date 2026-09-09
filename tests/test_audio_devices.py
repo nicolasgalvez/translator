@@ -110,7 +110,15 @@ def test_input_errors_identify_reason_and_available_choices(
 ])
 def test_launcher_exports_selected_input(tmp_path, arguments, expected):
     """Execute the real launcher with only the external package runner replaced."""
-    shutil.copyfile(Path(__file__).resolve().parents[1] / "run.sh", tmp_path / "run.sh")
+    repository_root = Path(__file__).resolve().parents[1]
+    shutil.copyfile(repository_root / "run.sh", tmp_path / "run.sh")
+    for name in ("runtime_config.py", "language.py", "websocket_security.py"):
+        shutil.copyfile(repository_root / name, tmp_path / name)
+    (tmp_path / "scripts").mkdir()
+    shutil.copyfile(
+        repository_root / "scripts" / "validate_runtime_config.py",
+        tmp_path / "scripts" / "validate_runtime_config.py",
+    )
     runner = tmp_path / "uv"
     runner.write_text('#!/bin/sh\nif [ "$1" = run ]; then printenv TRANSLATOR_DEVICE; fi\n')
     runner.chmod(0o755)
