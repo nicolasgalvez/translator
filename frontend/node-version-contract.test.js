@@ -32,6 +32,19 @@ function runPolicy(version) {
   })
 }
 
+function copyLauncherFiles(fixtureRoot) {
+  copyFileSync(resolve(repositoryRoot, "run.sh"), resolve(fixtureRoot, "run.sh"))
+  for (const name of ["runtime_config.py", "language.py", "websocket_security.py"]) {
+    copyFileSync(resolve(repositoryRoot, name), resolve(fixtureRoot, name))
+  }
+  const scripts = resolve(fixtureRoot, "scripts")
+  mkdirSync(scripts)
+  copyFileSync(
+    resolve(repositoryRoot, "scripts/validate_runtime_config.py"),
+    resolve(scripts, "validate_runtime_config.py"),
+  )
+}
+
 function compareVersions(left, right) {
   for (let index = 0; index < left.length; index += 1) {
     if (left[index] !== right[index]) return left[index] - right[index]
@@ -184,7 +197,7 @@ it("stops unsupported Node before dependency sync, frontend install, or build", 
   try {
     mkdirSync(scriptDirectory, { recursive: true })
     mkdirSync(binaryDirectory)
-    copyFileSync(resolve(repositoryRoot, "run.sh"), resolve(fixtureRoot, "run.sh"))
+    copyLauncherFiles(fixtureRoot)
     copyFileSync(policyScript, resolve(scriptDirectory, "node-version-policy.js"))
     writeFileSync(resolve(frontendDirectory, "package.json"), '{"type":"module"}\n')
     writeFileSync(resolve(frontendDirectory, "package-lock.json"), "{}\n")
@@ -234,7 +247,7 @@ it("reports how to install a supported Node when the executable is missing", () 
   try {
     mkdirSync(frontendDirectory)
     mkdirSync(binaryDirectory)
-    copyFileSync(resolve(repositoryRoot, "run.sh"), resolve(fixtureRoot, "run.sh"))
+    copyLauncherFiles(fixtureRoot)
     writeFileSync(resolve(frontendDirectory, "package.json"), "{}\n")
 
     for (const command of ["npm", "uv"]) {
