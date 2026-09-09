@@ -1,0 +1,33 @@
+name: Python Requirement
+
+on:
+  pull_request:
+    paths: &python_requirement_paths
+      - "README.md"
+      - "pyproject.toml"
+      - "tests/test_python_requirement_contract.py"
+      - ".github/workflows/*.yml"
+      - ".github/workflows/*.yaml"
+  push:
+    branches: [main]
+    paths: *python_requirement_paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-requirement:
+    name: python-requirement
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Verify the Python requirement
+        run: python -m unittest tests/test_python_requirement_contract.py
