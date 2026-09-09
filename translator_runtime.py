@@ -24,6 +24,7 @@ from audio_pipeline import (
     DropOldestQueue, UtteranceChunker,
 )
 from caption_jobs import CaptionJobManager
+from caption_uploads import CaptionUploadCapacityError
 from caption_translation import CaptionTranslationPolicy
 from decoded_audio import DecodedAudioPolicy, DecodedAudioTooLargeError
 from decoded_audio import InvalidAudioMetadataError  # pylint: disable=unused-import
@@ -646,20 +647,25 @@ class TranslatorRuntime:
                     )
                 destination.write(chunk)
 
-    async def captions_upload(self, file: UploadFile):
-        job_id = uuid.uuid4().hex[:12]
+    async def admit_caption_upload(self):
+        """Reserve capacity before the multipart parser consumes an upload body."""
+        await asyncio.to_thread(self.caption_manager.sweep)
+        return self.caption_manager.admit_upload(uuid.uuid4().hex[:12])
+
+    async def captions_upload(self, file: UploadFile, admission=None):
+        if admission is None:
+            admission = await self.admit_caption_upload()
+        if admission is None:
+            await file.close()
+            return CaptionUploadCapacityError().response()
+
+        job_id = admission.job_id
         job_dir = self.captions_dir / job_id
         video_path = job_dir / f"{uuid.uuid4().hex}.upload"
         created = False
         try:
             try:
                 self._check_running()
-                await asyncio.to_thread(self.caption_manager.sweep)
-                if not self.caption_manager.reserve(job_id):
-                    return JSONResponse(
-                        {"error": "Caption capacity is full; retry after current jobs finish"},
-                        status_code=429, headers={"Retry-After": "5"},
-                    )
                 job_dir.mkdir(parents=True)
                 created = True
                 await self._store_caption_upload(file, video_path)
@@ -667,14 +673,14 @@ class TranslatorRuntime:
                 await file.close()
 
             self._check_running()
-            self.caption_manager.submit(job_id, video_path, file.filename)
+            admission.submit(video_path, file.filename)
         except BaseException as exc:
             try:
                 if created:
                     video_path.unlink(missing_ok=True)
                     job_dir.rmdir()
             finally:
-                self.caption_manager.cancel_upload(job_id)
+                admission.release()
             if isinstance(exc, UploadTooLargeError):
                 return JSONResponse({"error": str(exc)}, status_code=413)
             raise

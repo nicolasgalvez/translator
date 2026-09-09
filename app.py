@@ -62,7 +62,8 @@ def create_app(runtime_factory=default_runtime_factory) -> FastAPI:
 
     @application.post("/captions/upload")
     async def captions_upload(request: Request, file: UploadFile = File(...)):
-        return await request.app.state.runtime.captions_upload(file)
+        admission = request.scope.get(CaptionUploadLimitMiddleware.ADMISSION_SCOPE_KEY)
+        return await request.app.state.runtime.captions_upload(file, admission)
 
     @application.get("/captions/status/{job_id}")
     async def captions_status(request: Request, job_id: str):

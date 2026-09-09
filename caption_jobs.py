@@ -13,6 +13,32 @@ from urllib.parse import quote
 from starlette.responses import StreamingResponse
 
 
+class CaptionUploadAdmission:
+    """Own one upload slot until submission succeeds or parsing stops."""
+
+    def __init__(self, manager, job_id):
+        self.manager = manager
+        self.job_id = job_id
+        self._lock = threading.Lock()
+        self._finished = False
+
+    def submit(self, video_path, original_filename):
+        """Transfer the slot to a queued job."""
+        with self._lock:
+            if self._finished:
+                raise RuntimeError("Caption upload admission is no longer active")
+            self.manager.submit(self.job_id, video_path, original_filename)
+            self._finished = True
+
+    def release(self):
+        """Return an unsubmitted slot exactly once."""
+        with self._lock:
+            if self._finished:
+                return
+            self._finished = True
+            self.manager.cancel_upload(self.job_id)
+
+
 class CaptionDownloadLease:  # pylint: disable=too-many-instance-attributes
     """One open artifact; an active reader owns deferred finalization."""
 
@@ -195,6 +221,12 @@ class CaptionJobManager:  # pylint: disable=too-many-instance-attributes
                 return False
             self._occupied.add(job_id)
             return True
+
+    def admit_upload(self, job_id):
+        """Return ownership of a newly reserved upload slot, if capacity permits."""
+        if not self.reserve(job_id):
+            return None
+        return CaptionUploadAdmission(self, job_id)
 
     def submit(self, job_id, video_path, original_filename):
         with self._lock:
