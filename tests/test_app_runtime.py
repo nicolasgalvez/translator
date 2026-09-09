@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
 from types import SimpleNamespace
 import wave
 import weakref
@@ -24,6 +25,253 @@ import numpy as np
 from starlette.websockets import WebSocketState
 
 from hooks import add_action, add_filter, clear_hooks
+
+
+def start_audio_workers(runtime):
+    """Start the production processing workers without acquiring hardware."""
+    for target in (runtime.audio_process_loop, runtime.audio_transcription_loop):
+        worker = threading.Thread(target=target)
+        runtime.worker_threads.append(worker)
+        worker.start()
+    return worker
+
+
+def wait_until(predicate):
+    deadline = time.monotonic() + 2
+    while not predicate() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert predicate()
+
+
+def test_audio_silence_retains_only_preroll_without_repeated_copying(tmp_path, monkeypatch):
+    importlib.import_module("scipy.signal")
+    module = importlib.import_module("translator_runtime")
+    received = []
+    concatenations = []
+    concatenate = np.concatenate
+
+    def tracked_concatenate(arrays, *args, **kwargs):
+        result = concatenate(arrays, *args, **kwargs)
+        concatenations.append(len(result))
+        return result
+
+    class Backend:  # pylint: disable=too-few-public-methods
+        name = "fixture"
+
+        def transcribe(self, audio, **_kwargs):
+            received.append(audio)
+            return [SimpleNamespace(text="after silence")], "es"
+
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+    runtime.backend = Backend()
+    runtime.transcript_file = tmp_path / "session.jsonl"
+    monkeypatch.setattr(np, "concatenate", tracked_concatenate)
+    start_audio_workers(runtime)
+    try:
+        for amplitude in [0] * 100 + [0.1, 0, 0]:
+            runtime.audio_chunk_queue.put(np.full(12000, amplitude, dtype="float32"))
+            wait_until(lambda: runtime.audio_chunk_queue.unfinished_tasks == 0)
+        wait_until(lambda: not runtime.text_queue.empty())
+        assert len(received) == 1
+        assert len(received[0]) == 20000  # 0.5s pre-roll + 0.25s speech + 0.5s pause.
+        assert len(concatenations) == 1
+        assert max(concatenations) == 60000
+    finally:
+        asyncio.run(runtime.stop())
+
+
+def test_audio_capture_overload_keeps_recent_chunks_and_reports_drops(tmp_path, caplog):
+    module = importlib.import_module("translator_runtime")
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+
+    class Stream:  # pylint: disable=too-few-public-methods
+        reads = 0
+
+        def read(self, frames):
+            self.reads += 1
+            if self.reads == 101:
+                runtime._stopping.set()  # pylint: disable=protected-access
+            return np.full((frames, 1), self.reads / 100, dtype="float32"), False
+
+    runtime.audio_stream = Stream()
+    runtime.audio_file = tmp_path / "capture.wav"
+    with wave.Wave_write(str(runtime.audio_file)) as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(48000)
+        runtime.wav_writer = writer
+        runtime.audio_capture_loop()
+    assert runtime.audio_chunk_queue.qsize() <= 8
+    chunks = []
+    while not runtime.audio_chunk_queue.empty():
+        chunks.append(runtime.audio_chunk_queue.get_nowait())
+    assert [round(float(chunk[0]) * 100) for chunk in chunks] == list(range(93, 101))
+    assert runtime.audio_chunk_queue.dropped_count == 92
+    assert "capture" in caplog.text and "dropped" in caplog.text
+    with wave.open(str(runtime.audio_file), "rb") as recording:
+        assert recording.getnframes() == 1200000
+
+
+def test_audio_chunking_continues_during_slow_inference(tmp_path):
+    importlib.import_module("scipy.signal")
+    module = importlib.import_module("translator_runtime")
+    entered, release = threading.Event(), threading.Event()
+
+    class Backend:  # pylint: disable=too-few-public-methods
+        name = "slow"
+
+        def transcribe(self, *_args, **_kwargs):
+            entered.set()
+            assert release.wait(10)
+            return [SimpleNamespace(text="recovered")], "es"
+
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+    runtime.backend = Backend()
+    runtime.transcript_file = tmp_path / "session.jsonl"
+    start_audio_workers(runtime)
+    try:
+        for amplitude in (0.1, 0, 0):
+            runtime.audio_chunk_queue.put(np.full(12000, amplitude, dtype="float32"))
+        assert entered.wait(2)
+        for amplitude in (0.2, 0, 0):
+            runtime.audio_chunk_queue.put(np.full(12000, amplitude, dtype="float32"))
+        wait_until(lambda: runtime.audio_chunk_queue.unfinished_tasks == 0)
+        assert runtime.utterance_queue.qsize() == 1
+    finally:
+        release.set()
+        asyncio.run(runtime.stop())
+
+
+def test_audio_chunker_bounds_silence_and_preserves_quiet_cuts():
+    chunker = importlib.import_module("audio_pipeline").UtteranceChunker()
+    for _ in range(4000):
+        assert chunker.add(np.zeros(12000, dtype="float32")) is None
+        assert chunker.buffered_samples <= 24000
+    # Start a fresh speech sequence; the quietest window ends at 4.6 seconds.
+    chunker.reset()
+    audio = np.full(480000, 0.1, dtype="float32")
+    audio[218400:220800] = 0.001
+    audio[240000:] = np.linspace(0.01, 0.005, 240000, dtype="float32")
+    outputs = []
+    for start in range(0, len(audio), 12000):
+        result = chunker.add(audio[start:start + 12000])
+        if result is not None:
+            outputs.append(result)
+            assert 24000 <= len(result) <= 240000
+        assert chunker.buffered_samples < 240000
+    for _ in range(2):
+        result = chunker.add(np.zeros(12000, dtype="float32"))
+        if result is not None:
+            outputs.append(result)
+    assert len(outputs[0]) == 220800
+    assert len(outputs[1]) == 240000  # Carried tail must not allow a 5.1-second emission.
+    np.testing.assert_array_equal(np.concatenate(outputs), np.pad(audio, (0, 24000)))
+    assert chunker.buffered_samples == 0
+
+
+def test_audio_chunker_waits_for_minimum_and_two_silent_chunks():
+    chunker = importlib.import_module("audio_pipeline").UtteranceChunker()
+    assert chunker.add(np.full(6000, 0.1, dtype="float32")) is None
+    assert chunker.add(np.zeros(6000, dtype="float32")) is None
+    assert chunker.add(np.zeros(6000, dtype="float32")) is None
+    output = chunker.add(np.zeros(6000, dtype="float32"))
+    assert len(output) == 24000
+    np.testing.assert_array_equal(output[:6000], np.full(6000, 0.1, dtype="float32"))
+    assert not np.any(output[6000:])
+
+
+def test_audio_silent_tail_never_reaches_inference_after_combined_boundary(tmp_path):
+    importlib.import_module("scipy.signal")
+    module = importlib.import_module("translator_runtime")
+    received = []
+
+    class Backend:  # pylint: disable=too-few-public-methods
+        name = "fixture"
+
+        def transcribe(self, audio, **_kwargs):
+            received.append(audio.copy())
+            return [SimpleNamespace(text="speech")], "es"
+
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+    runtime.backend = Backend()
+    runtime.transcript_file = tmp_path / "session.jsonl"
+    first = np.full(240000, 0.1, dtype="float32")
+    first[218400:220800] = 0.001
+    chunks = [first[start:start + 12000] for start in range(0, len(first), 12000)]
+    chunks += [np.full(12000, 0.1, dtype="float32") for _ in range(17)]
+    chunks += [np.zeros(12000, dtype="float32") for _ in range(20)]
+    start_audio_workers(runtime)
+    try:
+        for chunk in chunks:
+            runtime.audio_chunk_queue.put(chunk)
+            wait_until(lambda: runtime.audio_chunk_queue.unfinished_tasks == 0)
+            wait_until(lambda: runtime.utterance_queue.unfinished_tasks == 0)
+        assert len(received) == 2
+        assert [len(audio) for audio in received] == [73600, 80000]
+        assert all(np.any(audio) for audio in received)
+        assert runtime.audio_chunker.buffered_samples <= 24000
+    finally:
+        asyncio.run(runtime.stop())
+
+
+def test_audio_mixed_carried_tail_keeps_its_existing_silence_count():
+    chunker = importlib.import_module("audio_pipeline").UtteranceChunker()
+    audio = np.full(240000, 0.1, dtype="float32")
+    audio[192000:194400] = 0
+    audio[228000:] = 0
+    first = None
+    for start in range(0, len(audio), 12000):
+        first = chunker.add(audio[start:start + 12000])
+    assert len(first) == 194400  # 4.05s cut; tail includes speech and one silent read.
+    second = chunker.add(np.zeros(12000, dtype="float32"))
+    assert second is not None  # The next silent read completes the natural pause.
+    assert len(second) == 57600
+    np.testing.assert_array_equal(np.concatenate([first, second]), np.pad(audio, (0, 12000)))
+    assert chunker.buffered_samples == 0
+
+
+def test_audio_pending_overload_recovers_with_recent_utterances(tmp_path, caplog):
+    importlib.import_module("scipy.signal")
+    module = importlib.import_module("translator_runtime")
+    entered, release = threading.Event(), threading.Event()
+    received = []
+
+    class Backend:  # pylint: disable=too-few-public-methods
+        name = "slow"
+
+        def transcribe(self, audio, **_kwargs):
+            value = round(float(audio[1000]) * 100)
+            received.append(value)
+            entered.set()
+            assert release.wait(10)
+            return [SimpleNamespace(text=f"utterance {value}")], "es"
+
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+    runtime.backend = Backend()
+    runtime.transcript_file = tmp_path / "session.jsonl"
+    start_audio_workers(runtime)
+    try:
+        for number in range(1, 12):
+            for amplitude in (number / 100, 0, 0):
+                runtime.audio_chunk_queue.put(np.full(12000, amplitude, dtype="float32"))
+                wait_until(lambda: runtime.audio_chunk_queue.unfinished_tasks == 0)
+            if number == 1:
+                assert entered.wait(2)
+        assert runtime.utterance_queue.qsize() == 2
+        assert runtime.utterance_queue.dropped_count == 8
+        assert runtime.audio_chunk_queue.dropped_count == 0
+        assert "utterance" in caplog.text and "dropped" in caplog.text
+        release.set()
+        wait_until(lambda: runtime.text_queue.qsize() == 3)
+        assert received == [1, 10, 11]
+        saved_texts = [json.loads(line)["text"]
+                       for line in runtime.transcript_file.read_text().splitlines()]
+        assert saved_texts == [
+            "utterance 1", "utterance 10", "utterance 11",
+        ]
+    finally:
+        release.set()
+        asyncio.run(runtime.stop())
 
 
 @pytest.mark.parametrize("language", ["es", "invalid-language"])
@@ -484,9 +732,7 @@ def test_shutdown_discards_an_inflight_transcription(tmp_path):
         runtime.transcript_file = tmp_path / "session.jsonl"
         for amplitude in (0.1, 0, 0):
             runtime.audio_chunk_queue.put(np.full(12000, amplitude, dtype="float32"))
-        worker = threading.Thread(target=runtime.audio_process_loop)
-        runtime.worker_threads.append(worker)
-        worker.start()
+        worker = start_audio_workers(runtime)
         stopped = False
         try:
             assert await asyncio.to_thread(entered.wait, 2)
@@ -503,6 +749,12 @@ def test_shutdown_discards_an_inflight_transcription(tmp_path):
         assert backend_reference() is None
         assert not runtime.transcript_file.exists()
         assert runtime.text_queue.empty()
+        assert runtime.audio_chunk_queue.empty()
+        assert runtime.utterance_queue.empty()
+        runtime.audio_chunk_queue.put(np.ones(12000, dtype="float32"))
+        runtime.utterance_queue.put(np.ones(24000, dtype="float32"))
+        assert runtime.audio_chunk_queue.empty()
+        assert runtime.utterance_queue.empty()
 
     asyncio.run(exercise())
 
@@ -533,9 +785,7 @@ def test_shutdown_blocks_output_after_an_overdue_transcript_callback(tmp_path, h
         runtime.transcript_file = tmp_path / "session.jsonl"
         for amplitude in (0.1, 0, 0):
             runtime.audio_chunk_queue.put(np.full(12000, amplitude, dtype="float32"))
-        worker = threading.Thread(target=runtime.audio_process_loop)
-        runtime.worker_threads.append(worker)
-        worker.start()
+        worker = start_audio_workers(runtime)
         stopped = False
         try:
             assert await asyncio.to_thread(entered.wait, 2)
@@ -604,9 +854,7 @@ def test_shutdown_waits_for_a_transcript_file_commit(tmp_path, monkeypatch):
         runtime.transcript_file = tmp_path / "session.jsonl"
         for amplitude in (0.1, 0, 0):
             runtime.audio_chunk_queue.put(np.full(12000, amplitude, dtype="float32"))
-        worker = threading.Thread(target=runtime.audio_process_loop)
-        runtime.worker_threads.append(worker)
-        worker.start()
+        worker = start_audio_workers(runtime)
         shutdown = None
         try:
             assert await asyncio.to_thread(entered.wait, 2)
