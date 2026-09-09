@@ -49,6 +49,7 @@ class RuntimeConfig:
     device_name: str
     backend_name: str
     language: LanguageOption
+    max_upload_bytes: int
 
     @classmethod
     def from_environment(cls, environ):
@@ -67,10 +68,20 @@ class RuntimeConfig:
             raise ValueError("TRANSLATOR_PORT must be an integer") from exc
         if not 1 <= port <= 65535:
             raise ValueError("TRANSLATOR_PORT must be between 1 and 65535")
+        try:
+            max_upload_bytes = int(environ.get("TRANSLATOR_MAX_UPLOAD_BYTES", "1073741824"))
+        except ValueError as exc:
+            raise ValueError("TRANSLATOR_MAX_UPLOAD_BYTES must be a positive integer") from exc
+        if max_upload_bytes <= 0:
+            raise ValueError("TRANSLATOR_MAX_UPLOAD_BYTES must be a positive integer")
         if values["BACKEND"] not in ("faster-whisper", "mlx-whisper"):
             raise ValueError("TRANSLATOR_BACKEND must be 'faster-whisper' or 'mlx-whisper'")
         return cls(values["HOST"], port, values["MODEL"], values["DEVICE"],
-                   values["BACKEND"], LanguageOption.from_env(environ))
+                   values["BACKEND"], LanguageOption.from_env(environ), max_upload_bytes)
+
+
+class UploadTooLargeError(Exception):
+    """The uploaded file exceeds this runtime's configured byte limit."""
 
 
 # The runtime owns the existing application surface and its resources together.
@@ -646,32 +657,53 @@ class TranslatorRuntime:
     async def captions_page(self, request: Request):
         return self.templates.TemplateResponse(request=request, name="captions.html")
 
+    async def _store_caption_upload(self, file: UploadFile, video_path: Path):
+        """Copy bounded chunks, rejecting an oversized chunk before writing it."""
+        size = 0
+        with open(video_path, "xb") as destination:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > self.config.max_upload_bytes:
+                    raise UploadTooLargeError(
+                        f"Upload exceeds maximum size of {self.config.max_upload_bytes} bytes",
+                    )
+                destination.write(chunk)
+
     async def captions_upload(self, file: UploadFile):
-        self._check_running()
         job_id = uuid.uuid4().hex[:12]
         job_dir = self.captions_dir / job_id
-        job_dir.mkdir(parents=True, exist_ok=True)
+        video_path = job_dir / f"{uuid.uuid4().hex}.upload"
+        created = False
+        try:
+            try:
+                self._check_running()
+                job_dir.mkdir(parents=True)
+                created = True
+                await self._store_caption_upload(file, video_path)
+            finally:
+                await file.close()
 
-        # Save uploaded video
-        video_path = job_dir / file.filename
-        with open(video_path, "wb") as f:
-            while chunk := await file.read(1024 * 1024):
-                f.write(chunk)
-
-        self.caption_jobs[job_id] = {
-            "status": "queued",
-            "progress": 0,
-            "message": "Queued...",
-            "files": [],
-        }
-
-        self._check_running()
-        thread = threading.Thread(
-            target=self.caption_worker, args=(job_id, video_path), daemon=True,
-        )
-        thread.start()
-        self.worker_threads.append(thread)
-
+            self.caption_jobs[job_id] = {
+                "status": "queued",
+                "progress": 0,
+                "message": "Queued...",
+                "files": [],
+                "original_filename": file.filename,
+            }
+            self._check_running()
+            thread = threading.Thread(
+                target=self.caption_worker, args=(job_id, video_path), daemon=True,
+            )
+            thread.start()
+            self.worker_threads.append(thread)
+        except BaseException as exc:
+            if created:
+                self.caption_jobs.pop(job_id, None)
+                video_path.unlink(missing_ok=True)
+                job_dir.rmdir()
+            if isinstance(exc, UploadTooLargeError):
+                return JSONResponse({"error": str(exc)}, status_code=413)
+            raise
         return JSONResponse({"job_id": job_id})
 
     async def captions_status(self, job_id: str):

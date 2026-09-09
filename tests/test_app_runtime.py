@@ -86,6 +86,204 @@ def test_configuration_rejects_invalid_values(variable, value):
         module.RuntimeConfig.from_environment({variable: value})
 
 
+@pytest.mark.parametrize("environment,expected", [
+    ({}, 1073741824), ({"TRANSLATOR_MAX_UPLOAD_BYTES": "17"}, 17),
+])
+def test_max_upload_configuration(environment, expected):
+    module = importlib.import_module("translator_runtime")
+    assert module.RuntimeConfig.from_environment(environment).max_upload_bytes == expected
+
+
+@pytest.mark.parametrize("value", ["", " ", "invalid", "1.5", "0", "-1"])
+def test_max_upload_configuration_rejects_invalid_limit(value):
+    module = importlib.import_module("translator_runtime")
+    with pytest.raises(ValueError, match="TRANSLATOR_MAX_UPLOAD_BYTES"):
+        module.RuntimeConfig.from_environment({"TRANSLATOR_MAX_UPLOAD_BYTES": value})
+
+
+@pytest.fixture(name="upload_runtime")
+def fixture_upload_runtime(tmp_path):
+    """Keep storage and worker threads real; pause only external audio extraction."""
+    module = importlib.import_module("translator_runtime")
+    release = threading.Event()
+    entered = threading.Event()
+    inputs = []
+
+    class UploadRuntime(module.TranslatorRuntime):  # pylint: disable=too-few-public-methods
+        def extract_audio_16k(self, video_path, _audio_path):
+            inputs.append((video_path, video_path.read_bytes()))
+            entered.set()
+            release.wait(10)
+            return "Fixture extraction finished"
+
+    runtime = UploadRuntime(module.RuntimeConfig.from_environment({
+        "TRANSLATOR_MAX_UPLOAD_BYTES": "1048579",
+    }))
+    runtime.captions_dir = tmp_path / "captions"
+    yield runtime, entered, inputs
+    release.set()
+    asyncio.run(runtime.stop())
+
+
+@pytest.mark.parametrize("filename", [
+    "video.mp4", "../../escaped.mp4", "nested/video.mp4", "absolute", "audio.wav",
+])
+def test_upload_uses_server_filename_and_preserves_metadata(upload_runtime, tmp_path, filename):
+    runtime, entered, inputs = upload_runtime
+    if filename == "absolute":
+        filename = str(tmp_path / "escaped.mp4")
+    application = importlib.import_module("app").create_app()
+    application.state.runtime = runtime
+
+    async def exercise():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=application), base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/captions/upload", files={"file": (filename, b"video content")},
+            )
+            assert response.status_code == 200
+            payload = response.json()
+            assert set(payload) == {"job_id"}
+            assert len(payload["job_id"]) == 12
+            assert await asyncio.to_thread(entered.wait, 2)
+            job_dir = runtime.captions_dir / payload["job_id"]
+            path, content = inputs[0]
+            assert path.parent == job_dir
+            assert path.name not in (filename, "audio.wav")
+            assert content == b"video content"
+            assert list(job_dir.iterdir()) == [path]
+            assert sorted(tmp_path.iterdir()) == [runtime.captions_dir]
+            status = await client.get(f"/captions/status/{payload['job_id']}")
+            assert status.json()["original_filename"] == filename
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("size", [0, 1048579])
+def test_upload_accepts_exact_limit_and_closes_upload(upload_runtime, size):
+    runtime, entered, inputs = upload_runtime
+    module = importlib.import_module("translator_runtime")
+    upload = module.UploadFile(BytesIO(b"v" * size), filename="video.mp4")
+
+    async def exercise():
+        response = await runtime.captions_upload(upload)
+        assert response.status_code == 200
+        assert await asyncio.to_thread(entered.wait, 2)
+        assert inputs[0][1] == b"v" * size
+        assert upload.file.closed
+
+    asyncio.run(exercise())
+
+
+def test_upload_rejects_one_byte_over_http_limit_and_removes_job(upload_runtime):
+    runtime, entered, _inputs = upload_runtime
+    application = importlib.import_module("app").create_app()
+    application.state.runtime = runtime
+
+    async def exercise():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=application), base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/captions/upload", files={"file": ("video.mp4", b"v" * 1048580)},
+            )
+        assert response.status_code == 413
+        assert response.json() == {"error": "Upload exceeds maximum size of 1048579 bytes"}
+        assert not list(runtime.captions_dir.iterdir())
+        assert not runtime.caption_jobs
+        assert not runtime.worker_threads
+        assert not entered.is_set()
+
+    asyncio.run(exercise())
+
+
+def test_upload_checks_size_before_writing_and_closes_rejection(upload_runtime, monkeypatch):
+    runtime, entered, _inputs = upload_runtime
+    module = importlib.import_module("translator_runtime")
+    observed_sizes = []
+
+    class ObservedUpload(module.UploadFile):  # pylint: disable=too-few-public-methods
+        async def read(self, size=-1):
+            assert 0 < size <= 1048576
+            return await super().read(size)
+
+    class ObservedWriter:
+        def __init__(self, path, mode):
+            self.file = open(path, mode)  # pylint: disable=consider-using-with
+
+        def __enter__(self):
+            return self.file
+
+        def __exit__(self, *_args):
+            observed_sizes.append(self.file.tell())
+            self.file.close()
+
+    monkeypatch.setattr(module, "open", ObservedWriter, raising=False)
+    upload = ObservedUpload(BytesIO(b"v" * 2097153), filename="video.mp4")
+    response = asyncio.run(runtime.captions_upload(upload))
+    assert response.status_code == 413
+    assert max(observed_sizes) <= 1048579
+    assert upload.file.closed
+    assert not list(runtime.captions_dir.iterdir())
+    assert not runtime.caption_jobs
+    assert not entered.is_set()
+
+
+@pytest.mark.parametrize("failure", ["write", "thread_start", "mkdir"])
+def test_upload_failure_removes_files_and_job_and_closes_upload(
+    upload_runtime, monkeypatch, failure,
+):
+    runtime, entered, _inputs = upload_runtime
+    module = importlib.import_module("translator_runtime")
+    failure_error = OSError(f"{failure} failed")
+
+    class FailingWriter:
+        def __init__(self, path, mode):
+            self.file = open(path, mode)  # pylint: disable=consider-using-with
+
+        def __enter__(self):
+            return self
+
+        def write(self, data):
+            self.file.write(data[:2])
+            self.file.flush()
+            raise failure_error
+
+        def __exit__(self, *_args):
+            self.file.close()
+
+    if failure == "write":
+        monkeypatch.setattr(module, "open", FailingWriter, raising=False)
+    elif failure == "thread_start":
+        original_start = threading.Thread.start
+
+        def fail_start(thread):
+            if thread._target == runtime.caption_worker:  # pylint: disable=protected-access
+                raise failure_error
+            original_start(thread)
+        monkeypatch.setattr(threading.Thread, "start", fail_start)
+    else:
+        runtime.captions_dir.write_bytes(b"existing file")
+
+    upload = module.UploadFile(BytesIO(b"video content"), filename="video.mp4")
+
+    async def exercise():
+        with pytest.raises(OSError) as caught:
+            await runtime.captions_upload(upload)
+        if failure != "mkdir":
+            assert caught.value is failure_error
+            assert not list(runtime.captions_dir.iterdir())
+        else:
+            assert runtime.captions_dir.read_bytes() == b"existing file"
+        assert upload.file.closed
+        assert not runtime.caption_jobs
+        assert not runtime.worker_threads
+        assert not entered.is_set()
+
+    asyncio.run(exercise())
+
+
 def test_lifespan_owns_one_runtime_around_real_request(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     module = importlib.import_module("translator_runtime")

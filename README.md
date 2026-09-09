@@ -115,6 +115,17 @@ Browse saved transcript sessions. Each session saves a `.jsonl` transcript and a
 
 Upload a video or audio file to generate subtitle files. This workflow is preserved from the previous app.
 
+Each file can be up to 1 GiB (1073741824 bytes). Set `TRANSLATOR_MAX_UPLOAD_BYTES`
+to a positive integer number of bytes to override this limit, for example:
+
+```bash
+TRANSLATOR_MAX_UPLOAD_BYTES=524288000 ./run.sh
+```
+
+Files over the limit receive HTTP 413 and leave no caption job or partial upload.
+Uploaded files and generated subtitles use server-generated storage names; the
+original upload filename is retained as job metadata.
+
 ## Docker
 
 ```bash
