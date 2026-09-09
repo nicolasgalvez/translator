@@ -12,9 +12,10 @@ The existing video captions tool is still available at `/captions`.
 python3 --version
 ```
 
-### Node.js 20+
+### Node.js 22.12 through 22.x, 24.x, or 26+
 
-Required to install and build the React frontend.
+Required to install and build the React frontend. The supported package range is
+`^22.12.0 || ^24.0.0 || >=26.0.0`.
 
 ```bash
 node --version

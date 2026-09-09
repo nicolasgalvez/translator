@@ -10,7 +10,10 @@ name: Frontend
 on:
   pull_request:
     paths: &frontend_paths
+      - "Dockerfile"
+      - "README.md"
       - "frontend/**"
+      - "run.sh"
       - "templates/captions.html"
       - ".github/workflows/frontend.yml"
   push:
