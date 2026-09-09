@@ -20,7 +20,10 @@ on:
       - "uv.lock"
       - "frontend/**"
       - "scripts/check-docker-context.sh"
+      - "scripts/smoke-docker-runtime.sh"
       - "tests/docker-context.Dockerfile"
+      - "tests/docker_smoke_app.py"
+      - "tests/test_docker_runtime_contract.py"
       - ".github/workflows/docker.yml"
   push:
     branches: [main]
@@ -37,7 +40,7 @@ jobs:
   docker:
     name: docker
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -62,4 +65,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Validate the compose file
-        run: docker compose config --quiet
+        run: TRANSLATOR_DEVICE="CI ALSA input" docker compose config --quiet
+
+      - name: Build and smoke test the runtime image
+        run: ./scripts/smoke-docker-runtime.sh
