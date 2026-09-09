@@ -27,6 +27,5 @@ jobs:
       # pre-install of a CPU wheel that used to live here is no longer needed —
       # --extra cpu selects it from the lockfile.
       run: uv sync --locked --group dev --extra cpu
-    - name: Analysing the code with pylint
-      run: |
-        uv run pylint $(git ls-files '*.py')
+    - name: Analyze the code with Pylint
+      run: uv run --locked --extra cpu python scripts/lint_python.py
