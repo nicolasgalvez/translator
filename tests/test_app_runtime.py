@@ -2493,6 +2493,48 @@ def test_caption_worker_stops_after_inflight_backend_returns(tmp_path):
     asyncio.run(exercise())
 
 
+def test_caption_worker_rejects_unsupported_language_before_argos_or_output(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    reached = []
+
+    class CaptionRuntime(module.TranslatorRuntime):
+        def extract_audio_16k(self, _video_path, _audio_path):
+            return None
+
+        def load_audio_16k(self, _audio_path):
+            return np.zeros(4000, dtype=np.float32)
+
+        def transcribe_segments(self, _audio_array, job):
+            job.update(progress=45, message="Transcribed 1 segments...")
+            return [{"start": 0, "end": 0.25, "text": "bonjour"}], "fr"
+
+        def ensure_argos_packages(self, _job):
+            reached.append("Argos")
+
+        def write_caption_files(self, *_args):
+            reached.append("subtitle output")
+            return ["video.translated.srt"]
+
+    runtime = CaptionRuntime(module.RuntimeConfig.from_environment({}))
+    runtime.captions_dir = tmp_path
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video_path = job_dir / "video.upload"
+    video_path.write_bytes(b"video")
+    runtime.caption_jobs["job"] = {"status": "queued", "files": []}
+
+    runtime.caption_worker("job", video_path)
+
+    job = runtime.caption_jobs["job"]
+    assert job["status"] == "error"
+    assert "fr" in job["message"]
+    assert "en, es" in job["message"]
+    assert job["files"] == []
+    assert "detected_language" not in job
+    assert not list(job_dir.glob("*.srt"))
+    assert not reached
+
+
 @pytest.mark.parametrize("device_setting", [None, "default", "MacBook Pro Microphone"])
 @pytest.mark.parametrize("broadcast_failure", [False, True])
 def test_runtime_shutdown_closes_owned_resources(

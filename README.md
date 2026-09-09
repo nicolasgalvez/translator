@@ -177,6 +177,12 @@ Browse saved transcript sessions. Each session saves a `.jsonl` transcript and a
 
 Upload a video or audio file to generate subtitle files. This workflow is preserved from the previous app.
 
+Caption translation supports detected English (`en`) and Spanish (`es`) speech
+only. English segments are translated to Spanish, and Spanish segments are
+translated to English. If any segment is detected as another language, the job
+ends with an explicit error listing the unsupported and supported language codes;
+it does not publish original or translated subtitle files.
+
 Each file can be up to 1 GiB (1073741824 bytes). Set `TRANSLATOR_MAX_UPLOAD_BYTES`
 to a positive integer number of bytes to override this limit, for example:
 
