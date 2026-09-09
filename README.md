@@ -283,6 +283,43 @@ transcripts in `./transcripts`; caption job files remain ephemeral in the contai
 
 ## Running Tests
 
+### Dependency security
+
+Argos Translate 1.11.0 pins Stanza 1.10.1, which is vulnerable to
+PYSEC-2026-3075 / CVE-2025-68481. The project directly requires Stanza 1.12.2
+or newer and uses one uv override to replace that transitive pin. Remove the
+override only after a published Argos Translate release no longer pins Stanza 1.10.1
+and its published requirements resolve Stanza 1.12.2 or newer. Then
+upgrade Argos Translate, regenerate `uv.lock`, and run the compatibility test
+and dependency audit.
+
+Audit every supported production graph locally with uv 0.12.12 and the scanner
+environment locked in `dependency-audit/uv.lock`. The target compile filters
+the locked universal export so a Linux host still audits the Apple Silicon
+dependencies. The validation step rejects any selected package version absent
+from the root `uv.lock`:
+
+TRAN-47 upgraded the CUDA Torch source and matching container runtime before
+this audit gate was introduced. All three target audits must pass without
+vulnerability ignores or suppressions.
+
+```bash
+set -euo pipefail
+audit_status=0
+while read -r name extra platform; do
+  uvx --from 'uv==0.12.12' uv export --locked --no-default-groups --extra "$extra" --no-emit-project --emit-index-url --output-file "requirements-$name.in"
+  MACOSX_DEPLOYMENT_TARGET=14.0 uvx --from 'uv==0.12.12' uv pip compile "requirements-$name.in" --python-platform "$platform" --python-version 3.11 --no-deps --index-strategy unsafe-best-match --output-file "requirements-$name.txt"
+  uvx --from 'uv==0.12.12' uv run --project dependency-audit --locked python scripts/dependency_audit.py uv.lock "requirements-$name.txt"
+  uvx --from 'uv==0.12.12' uv run --project dependency-audit --locked pip-audit --requirement "requirements-$name.txt" --disable-pip --no-deps --strict --vulnerability-service osv || audit_status=1
+done <<'EOF'
+linux-cpu cpu x86_64-unknown-linux-gnu
+linux-cuda cuda x86_64-unknown-linux-gnu
+macos-mlx mlx aarch64-apple-darwin
+EOF
+rm requirements-linux-{cpu,cuda}.{in,txt} requirements-macos-mlx.{in,txt}
+test "$audit_status" -eq 0
+```
+
 ```bash
 uv run --only-group dev python -m unittest discover -s tests -p 'test_hooks.py'
 uv run --only-group dev python -m unittest discover -s tests -p 'test_transcript_events.py'

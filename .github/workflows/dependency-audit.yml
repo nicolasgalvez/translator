@@ -1,0 +1,87 @@
+name: Dependency Audit
+
+on:
+  pull_request:
+    paths: &dependency_audit_paths
+      - "pyproject.toml"
+      - "uv.lock"
+      - "dependency-audit/pyproject.toml"
+      - "dependency-audit/uv.lock"
+      - "README.md"
+      - "scripts/dependency_audit.py"
+      - "tests/test_argos_stanza_compatibility.py"
+      - "tests/test_dependency_audit.py"
+      - "tests/test_dependency_security_contract.py"
+      - ".github/workflows/dependency-audit.yml"
+  push:
+    branches: [main]
+    paths: *dependency_audit_paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-audit:
+    name: audit-${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # mlx 0.32.2 publishes Apple Silicon wheels for macOS 14 or newer.
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-cpu
+            extra: cpu
+            platform: x86_64-unknown-linux-gnu
+          - name: linux-cuda
+            extra: cuda
+            platform: x86_64-unknown-linux-gnu
+          - name: macos-mlx
+            extra: mlx
+            platform: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.12.12"
+          enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
+            dependency-audit/uv.lock
+      - name: Export locked production graph for target platform
+        run: |
+          uv export --locked --no-default-groups --extra ${{ matrix.extra }} --no-emit-project --emit-index-url --output-file requirements-${{ matrix.name }}.in
+          uv pip compile requirements-${{ matrix.name }}.in --python-platform ${{ matrix.platform }} --python-version 3.11 --no-deps --index-strategy unsafe-best-match --output-file requirements-${{ matrix.name }}.txt
+          uv run --project dependency-audit --locked python scripts/dependency_audit.py uv.lock requirements-${{ matrix.name }}.txt
+      - name: Audit production dependencies
+        run: uv run --project dependency-audit --locked pip-audit --requirement requirements-${{ matrix.name }}.txt --disable-pip --no-deps --strict --vulnerability-service osv
+
+  compatibility:
+    name: argos-stanza-compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.12.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install locked runtime
+        run: uv sync --locked --group dev --extra cpu
+      - name: Verify Argos and Stanza compatibility
+        run: uv run --no-sync pytest tests/test_argos_stanza_compatibility.py -q
