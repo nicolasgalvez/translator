@@ -9,9 +9,10 @@ from tempfile import TemporaryDirectory
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_MINIMUM = (3, 11)
-VERSION_DECLARATION = re.compile(r"^\s*python-version\s*:")
+VERSION_KEY = r'''(?:python-version|"python-version"|'python-version')'''
+VERSION_DECLARATION = re.compile(rf"^\s*{VERSION_KEY}\s*:")
 LITERAL_VERSION_DECLARATION = re.compile(
-    r'''^\s*python-version\s*:\s*(?:"(\d+\.\d+)"|'(\d+\.\d+)'|(\d+\.\d+))'''
+    rf'''^\s*{VERSION_KEY}\s*:\s*(?:"(\d+\.\d+)"|'(\d+\.\d+)'|(\d+\.\d+))'''
     r"(?:\s+#.*)?\s*$"
 )
 
@@ -89,6 +90,35 @@ class PythonRequirementContractTests(unittest.TestCase):
                     )
                 }
             )
+
+    def test_quoted_keys_cannot_hide_old_version(self):
+        for key in ('"python-version"', "'python-version'"):
+            with self.subTest(key=key):
+                versions = self._temporary_workflow_versions(
+                    {
+                        "future.yml": (
+                            'python-version: "3.11"\n'
+                            f'{key}: "3.10" # legacy\n'
+                        )
+                    }
+                )
+                self.assertIn((3, 10), versions.values())
+
+    def test_malformed_quoted_key_declaration_is_rejected(self):
+        for key in ('"python-version"', "'python-version'"):
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    "literal major.minor version",
+                ):
+                    self._temporary_workflow_versions(
+                        {
+                            "future.yml": (
+                                'python-version: "3.11"\n'
+                                f"{key}: " + "${{ matrix.python }}\n"
+                            )
+                        }
+                    )
 
     @staticmethod
     def _wrong_versions(requirements):
