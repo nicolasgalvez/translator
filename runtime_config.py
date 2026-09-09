@@ -37,6 +37,7 @@ class RuntimeConfig:  # pylint: disable=too-many-instance-attributes
     history_entry_limit: int = 500
     websocket_queue_capacity: int = 32
     recording_storage_bytes: int = 8 * 1024 * 1024 * 1024
+    max_decoded_audio_bytes: int = 256 * 1024 * 1024
 
     @classmethod
     def from_environment(cls, environ):
@@ -96,4 +97,7 @@ class RuntimeConfig:  # pylint: disable=too-many-instance-attributes
                    websocket_queue_capacity, _positive_integer_setting(
                        environ, "TRANSLATOR_RECORDING_STORAGE_BYTES",
                        str(8 * 1024 * 1024 * 1024),
+                   ), _positive_integer_setting(
+                       environ, "TRANSLATOR_MAX_DECODED_AUDIO_BYTES",
+                       str(256 * 1024 * 1024),
                    ))

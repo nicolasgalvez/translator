@@ -248,6 +248,17 @@ TRANSLATOR_MAX_UPLOAD_BYTES=524288000 ./run.sh
 ```
 
 Files over the limit receive HTTP 413 and leave no caption job or partial upload.
+Decoded caption audio is limited separately to 256 MiB of mono 16 kHz PCM
+(about 2 hours 20 minutes). Override the positive byte limit when needed:
+
+```bash
+TRANSLATOR_MAX_DECODED_AUDIO_BYTES=134217728 ./run.sh
+```
+
+The decoder stops after one frame beyond this limit so compressed media cannot
+expand into an unbounded WAV or memory allocation. Oversized jobs report the
+limit and remove both the uploaded media and temporary decoded audio.
+
 The complete request body is also capped before multipart parsing at the configured
 file limit plus 64 KiB (65536 bytes) for multipart headers, boundaries, and fields.
 This request cap counts actual streamed bytes even without a reliable Content-Length;
