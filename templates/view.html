@@ -103,6 +103,12 @@
     {% if entries_truncated %}
     <div class="notice">Showing the {{ entry_limit }} most recent entries. Earlier entries are not displayed.</div>
     {% endif %}
+    {% if scan_truncated %}
+    <div class="notice">Older history was not inspected because the read limit was reached.</div>
+    {% endif %}
+    {% if skipped_records %}
+    <div class="notice">{{ skipped_records }} damaged record{% if skipped_records != 1 %}s{% endif %} skipped within the inspected history.</div>
+    {% endif %}
     <div class="panels">
         <div class="panel es">
             <div class="panel-header">Transcript</div>

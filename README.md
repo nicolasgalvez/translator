@@ -191,7 +191,17 @@ History shows the 50 newest sessions and the 500 most recent entries in a sessio
 by default. Truncated session lists, entry counts, and detail views are labeled in
 the interface. Detail reads inspect at most the newest 4 MiB, and each JSONL entry
 is limited to 64 KiB so a damaged or oversized record cannot force an unbounded
-allocation. Set positive integer limits with
+allocation. Invalid JSON, invalid UTF-8, non-object values, oversized records, and
+non-empty final records without a newline are skipped without hiding valid records.
+The list stops after enough valid records establish its bounded count or after
+scanning 64 MiB per session. It reports only damaged records encountered before
+that point; an unscanned suffix is never included in the damaged count. A detail
+view likewise reports only damaged records encountered while finding its bounded
+recent results. History pages disclose when either byte limit ends inspection.
+Detail pages also distinguish a known omitted valid entry from data that was not
+inspected. Server warnings identify only an escaped session filename and the
+detected count. Damaged files and transcript contents are unchanged.
+Set positive integer limits with
 `TRANSLATOR_HISTORY_SESSION_LIMIT` and `TRANSLATOR_HISTORY_ENTRY_LIMIT`, for example:
 
 ```bash

@@ -70,6 +70,347 @@ def test_history_reader_prefers_newest_sessions_and_discloses_partial_counts(tmp
     assert listing["transcripts"][0]["label"] == "September 03, 2026 at 12:00 PM"
 
 
+def test_history_listing_skips_malformed_records_and_counts_valid_entries(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    session = tmp_path / "2026-09-03_120000.jsonl"
+    session.write_bytes(
+        b'{"time":"12:00:00","text":"first"}\n'
+        b'{not valid json}\n'
+        b'{"time":"12:00:02","text":"last"}\n'
+    )
+
+    listing = module.TranscriptHistoryReader(
+        tmp_path, session_limit=2, entry_limit=5,
+    ).list_sessions()
+
+    assert listing["transcripts"][0]["count"] == 2
+    assert listing["transcripts"][0]["count_truncated"] is False
+    assert listing["transcripts"][0]["skipped_records"] == 1
+
+
+def test_history_listing_skips_nonstandard_json_constants(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    session = tmp_path / "2026-09-03_120000.jsonl"
+    session.write_bytes(b'{"time":"12:00:00","text":NaN}\n')
+
+    listing = module.TranscriptHistoryReader(
+        tmp_path, session_limit=2, entry_limit=5,
+    ).list_sessions()
+
+    assert listing["transcripts"][0]["count"] == 0
+    assert listing["transcripts"][0]["skipped_records"] == 1
+
+
+def test_history_listing_rejects_every_non_object_json_value(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    session = tmp_path / "2026-09-03_120000.jsonl"
+    session.write_bytes(b'[]\n"text"\n42\ntrue\nnull\n')
+
+    listing = module.TranscriptHistoryReader(
+        tmp_path, session_limit=2, entry_limit=5,
+    ).list_sessions()
+
+    assert listing["transcripts"][0]["count"] == 0
+    assert listing["transcripts"][0]["skipped_records"] == 5
+
+
+def test_history_listing_skips_records_the_json_decoder_cannot_nest(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    session = tmp_path / "2026-09-03_120000.jsonl"
+    session.write_bytes((b"[" * 30000) + (b"]" * 30000) + b"\n")
+
+    listing = module.TranscriptHistoryReader(
+        tmp_path, session_limit=2, entry_limit=5,
+    ).list_sessions()
+
+    assert listing["transcripts"][0]["count"] == 0
+    assert listing["transcripts"][0]["skipped_records"] == 1
+
+
+def test_history_listing_skips_invalid_utf8_records(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    session = tmp_path / "2026-09-03_120000.jsonl"
+    session.write_bytes(
+        b'{"time":"12:00:00","text":"valid"}\n'
+        b'{"time":"12:00:01","text":"\xff"}\n'
+    )
+
+    listing = module.TranscriptHistoryReader(
+        tmp_path, session_limit=2, entry_limit=5,
+    ).list_sessions()
+
+    assert listing["transcripts"][0]["count"] == 1
+    assert listing["transcripts"][0]["skipped_records"] == 1
+
+
+def test_history_reader_rejects_surrogates_in_nested_values_and_object_keys(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    session = tmp_path / "2026-09-03_120000.jsonl"
+    session.write_bytes(
+        b'{"time":"12:00:00","text":"first"}\n'
+        b'{"\\ud800":"unsafe key"}\n'
+        b'{"meta":{"items":["\\udfff"]}}\n'
+        b'{"time":"12:00:03","text":"last"}\n'
+    )
+    reader = module.TranscriptHistoryReader(tmp_path, session_limit=2, entry_limit=5)
+
+    listing = reader.list_sessions()
+    detail = reader.read_session(session.name)
+
+    assert listing["transcripts"][0]["count"] == 2
+    assert listing["transcripts"][0]["skipped_records"] == 2
+    assert [entry["text"] for entry in detail["entries"]] == ["first", "last"]
+    assert detail["skipped_records"] == 2
+
+
+def test_history_listing_treats_a_valid_unterminated_final_record_as_corrupt(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    session = tmp_path / "2026-09-03_120000.jsonl"
+    session.write_bytes(
+        b'{"time":"12:00:00","text":"complete"}\n'
+        b'{"time":"12:00:01","text":"crash-written"}'
+    )
+
+    listing = module.TranscriptHistoryReader(
+        tmp_path, session_limit=2, entry_limit=5,
+    ).list_sessions()
+
+    assert listing["transcripts"][0]["count"] == 1
+    assert listing["transcripts"][0]["skipped_records"] == 1
+
+
+def test_history_listing_reports_only_corruption_seen_before_the_valid_limit(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    session = tmp_path / "2026-09-03_120000.jsonl"
+    session.write_bytes(
+        b'{"time":"12:00:00","text":"first"}\n'
+        b'{first damaged record}\n'
+        b'{"time":"12:00:01","text":"second"}\n'
+        b'{unscanned damaged record}\n'
+    )
+
+    listing = module.TranscriptHistoryReader(
+        tmp_path, session_limit=2, entry_limit=1,
+    ).list_sessions()
+
+    assert listing["transcripts"][0]["count"] == 1
+    assert listing["transcripts"][0]["count_truncated"] is True
+    assert listing["transcripts"][0]["scan_truncated"] is True
+    assert listing["transcripts"][0]["skipped_records"] == 1
+
+
+def test_history_listing_stops_after_proving_the_valid_count_is_truncated(
+    tmp_path, monkeypatch,
+):
+    module = importlib.import_module("translator_runtime")
+    session = tmp_path / "session.jsonl"
+    session.touch()
+    lines = [
+        b'{"time":"12:00:00","text":"first"}\n',
+        b'{"time":"12:00:01","text":"second"}\n',
+    ]
+    reads = 0
+
+    class BoundedListing:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def readline(self, _size=-1):
+            nonlocal reads
+            reads += 1
+            if reads > len(lines):
+                raise AssertionError("listing read beyond entry_limit + 1 valid records")
+            return lines[reads - 1]
+
+    monkeypatch.setattr(Path, "open", lambda *_args, **_kwargs: BoundedListing())
+
+    listing = module.TranscriptHistoryReader(
+        tmp_path, session_limit=1, entry_limit=1,
+    ).list_sessions()
+
+    assert reads == 2
+    assert listing["transcripts"][0]["count"] == 1
+    assert listing["transcripts"][0]["count_truncated"] is True
+    assert listing["transcripts"][0]["scan_truncated"] is True
+    assert listing["transcripts"][0]["skipped_records"] == 0
+
+
+def test_history_listing_bounds_an_endless_stream_of_damaged_records(
+    tmp_path, monkeypatch,
+):
+    module = importlib.import_module("translator_runtime")
+    session = tmp_path / "session.jsonl"
+    session.touch()
+    reads = 0
+
+    class EndlessDamage:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def readline(self, _size=-1):
+            nonlocal reads
+            reads += 1
+            if reads > 3:
+                raise AssertionError("listing exceeded its byte budget")
+            return b"{bad}\n"
+
+    monkeypatch.setattr(Path, "open", lambda *_args, **_kwargs: EndlessDamage())
+    monkeypatch.setattr(
+        module.TranscriptHistoryReader, "_MAX_LIST_BYTES", 18, raising=False,
+    )
+
+    listing = module.TranscriptHistoryReader(
+        tmp_path, session_limit=1, entry_limit=1,
+    ).list_sessions()
+
+    assert reads == 3
+    assert listing["transcripts"][0]["count"] == 0
+    assert listing["transcripts"][0]["count_truncated"] is False
+    assert listing["transcripts"][0]["scan_truncated"] is True
+    assert listing["transcripts"][0]["skipped_records"] == 3
+
+
+def test_history_listing_bounds_one_endless_oversized_record(tmp_path, monkeypatch):
+    module = importlib.import_module("translator_runtime")
+    session = tmp_path / "session.jsonl"
+    session.touch()
+    reads = 0
+
+    class EndlessOversizedRecord:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def readline(self, size=-1):
+            nonlocal reads
+            reads += 1
+            if reads > 2:
+                raise AssertionError("oversized record drain exceeded the byte budget")
+            return b"x" * size
+
+    monkeypatch.setattr(
+        Path, "open", lambda *_args, **_kwargs: EndlessOversizedRecord(),
+    )
+    monkeypatch.setattr(module.TranscriptHistoryReader, "_MAX_ENTRY_BYTES", 4)
+    monkeypatch.setattr(
+        module.TranscriptHistoryReader, "_MAX_LIST_BYTES", 10, raising=False,
+    )
+
+    listing = module.TranscriptHistoryReader(
+        tmp_path, session_limit=1, entry_limit=1,
+    ).list_sessions()
+
+    assert reads == 2
+    assert listing["transcripts"][0]["count"] == 0
+    assert listing["transcripts"][0]["count_truncated"] is False
+    assert listing["transcripts"][0]["scan_truncated"] is True
+    assert listing["transcripts"][0]["skipped_records"] == 1
+
+
+def test_history_listing_treats_an_exact_budget_unterminated_record_as_eof(
+    tmp_path, monkeypatch,
+):
+    module = importlib.import_module("translator_runtime")
+    session = tmp_path / "session.jsonl"
+    session.write_bytes(b"{}")
+    monkeypatch.setattr(module.TranscriptHistoryReader, "_MAX_LIST_BYTES", 2)
+
+    listing = module.TranscriptHistoryReader(
+        tmp_path, session_limit=1, entry_limit=1,
+    ).list_sessions()
+
+    assert listing["transcripts"][0]["count"] == 0
+    assert listing["transcripts"][0]["count_truncated"] is False
+    assert listing["transcripts"][0]["scan_truncated"] is False
+    assert listing["transcripts"][0]["skipped_records"] == 1
+
+
+def test_history_listing_treats_an_exact_budget_terminated_record_as_eof(
+    tmp_path, monkeypatch,
+):
+    module = importlib.import_module("translator_runtime")
+    session = tmp_path / "session.jsonl"
+    session.write_bytes(b"{}\n")
+    monkeypatch.setattr(module.TranscriptHistoryReader, "_MAX_LIST_BYTES", 3)
+
+    listing = module.TranscriptHistoryReader(
+        tmp_path, session_limit=1, entry_limit=1,
+    ).list_sessions()
+
+    assert listing["transcripts"][0]["count"] == 1
+    assert listing["transcripts"][0]["count_truncated"] is False
+    assert listing["transcripts"][0]["scan_truncated"] is False
+    assert listing["transcripts"][0]["skipped_records"] == 0
+
+
+def test_history_listing_counts_an_exact_budget_oversized_record_at_eof(
+    tmp_path, monkeypatch,
+):
+    module = importlib.import_module("translator_runtime")
+    session = tmp_path / "session.jsonl"
+    session.write_bytes(b"x" * 5)
+    monkeypatch.setattr(module.TranscriptHistoryReader, "_MAX_ENTRY_BYTES", 4)
+    monkeypatch.setattr(module.TranscriptHistoryReader, "_MAX_LIST_BYTES", 5)
+
+    listing = module.TranscriptHistoryReader(
+        tmp_path, session_limit=1, entry_limit=1,
+    ).list_sessions()
+
+    assert listing["transcripts"][0]["count"] == 0
+    assert listing["transcripts"][0]["count_truncated"] is False
+    assert listing["transcripts"][0]["scan_truncated"] is False
+    assert listing["transcripts"][0]["skipped_records"] == 1
+
+
+def test_history_listing_does_not_read_growth_after_its_open_file_snapshot(
+    tmp_path, monkeypatch,
+):
+    module = importlib.import_module("translator_runtime")
+    session = tmp_path / "session.jsonl"
+    session.write_bytes(b"{}")
+    original_open = Path.open
+
+    class GrowingFile:
+        def __init__(self):
+            self.stream = None
+
+        def __enter__(self):
+            self.stream = original_open(session, "rb")
+            return self
+
+        def __exit__(self, *_args):
+            self.stream.close()
+            return False
+
+        def fileno(self):
+            return self.stream.fileno()
+
+        def readline(self, size=-1):
+            with original_open(session, "ab") as appended:
+                appended.write(b"\n{}\n")
+            return self.stream.readline(size)
+
+    monkeypatch.setattr(Path, "open", lambda *_args, **_kwargs: GrowingFile())
+
+    listing = module.TranscriptHistoryReader(
+        tmp_path, session_limit=1, entry_limit=1,
+    ).list_sessions()
+
+    assert listing["transcripts"][0]["count"] == 0
+    assert listing["transcripts"][0]["scan_truncated"] is False
+    assert listing["transcripts"][0]["skipped_records"] == 1
+    with original_open(session, "rb") as saved:
+        assert saved.read() == b"{}\n{}\n"
+
+
 def test_history_reader_streams_and_retains_only_recent_entries(tmp_path, monkeypatch):
     module = importlib.import_module("translator_runtime")
     session = tmp_path / "2026-09-03_120000.jsonl"
@@ -90,6 +431,62 @@ def test_history_reader_streams_and_retains_only_recent_entries(tmp_path, monkey
     assert detail["label"] == "September 03, 2026 at 12:00 PM"
     assert detail["has_audio"] is True
     assert detail["audio_url"] == "/audio/2026-09-03_120000.wav"
+
+
+def test_history_detail_skips_corruption_and_preserves_valid_entry_order(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    session = tmp_path / "2026-09-03_120000.jsonl"
+    session.write_bytes(
+        b'{"time":"12:00:00","text":"first"}\n'
+        b'{not valid json}\n'
+        b'{"time":"12:00:02","text":"last"}\n'
+        b'{"time":"12:00:03","text":"crash-written"}'
+    )
+
+    detail = module.TranscriptHistoryReader(
+        tmp_path, session_limit=2, entry_limit=5,
+    ).read_session(session.name)
+
+    assert [entry["text"] for entry in detail["entries"]] == ["first", "last"]
+    assert detail["entries_truncated"] is False
+    assert detail["skipped_records"] == 2
+
+
+def test_history_reader_logs_one_content_safe_warning_per_affected_operation(
+    tmp_path, caplog,
+):
+    module = importlib.import_module("translator_runtime")
+    session = tmp_path / "2026-09-03_120000.jsonl"
+    session.write_bytes(b'{"private transcript contents": not-json}\n')
+    reader = module.TranscriptHistoryReader(tmp_path, session_limit=2, entry_limit=5)
+
+    reader.list_sessions()
+    reader.read_session(session.name)
+
+    warnings = [record.getMessage() for record in caplog.records]
+    assert len(warnings) == 2
+    assert all(session.name in warning for warning in warnings)
+    assert all("1 corrupt record" in warning for warning in warnings)
+    assert any("listing" in warning for warning in warnings)
+    assert any("reading" in warning for warning in warnings)
+    assert all("private transcript contents" not in warning for warning in warnings)
+
+
+def test_history_reader_escapes_control_characters_in_logged_filenames(
+    tmp_path, caplog,
+):
+    module = importlib.import_module("translator_runtime")
+    unsafe_name = "evil\n\x1b[31mforged.jsonl"
+    (tmp_path / unsafe_name).write_bytes(b"{damaged}\n")
+
+    module.TranscriptHistoryReader(
+        tmp_path, session_limit=2, entry_limit=5,
+    ).list_sessions()
+
+    warning = caplog.records[0].getMessage()
+    assert "\n" not in warning
+    assert "\x1b" not in warning
+    assert r"evil\n\x1b[31mforged.jsonl" in warning
 
 
 def test_history_detail_reads_only_a_bounded_recent_tail(tmp_path, monkeypatch):
@@ -153,13 +550,90 @@ def test_history_detail_reads_only_a_bounded_recent_tail(tmp_path, monkeypatch):
     assert detail["entries_truncated"] is True
 
 
-def test_history_count_rejects_an_oversized_entry_with_a_bounded_read(tmp_path, monkeypatch):
+def test_history_detail_does_not_call_older_blank_lines_truncated_entries(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    session = tmp_path / "session.jsonl"
+    session.write_bytes(
+        (b"\n" * 70000) + b'{"time":"12:00:00","text":"only valid entry"}\n'
+    )
+
+    detail = module.TranscriptHistoryReader(
+        tmp_path, session_limit=1, entry_limit=1,
+    ).read_session(session.name)
+
+    assert [entry["text"] for entry in detail["entries"]] == ["only valid entry"]
+    assert detail["entries_truncated"] is False
+    assert detail["skipped_records"] == 0
+
+
+def test_history_detail_counts_an_unterminated_final_record_beyond_its_byte_budget(
+    tmp_path, monkeypatch,
+):
+    module = importlib.import_module("translator_runtime")
+    session = tmp_path / "session.jsonl"
+    session.write_bytes(b"x" * 64)
+    monkeypatch.setattr(module.TranscriptHistoryReader, "_MAX_DETAIL_BYTES", 32)
+
+    detail = module.TranscriptHistoryReader(
+        tmp_path, session_limit=1, entry_limit=1,
+    ).read_session(session.name)
+
+    assert detail["entries"] == []
+    assert detail["entries_truncated"] is False
+    assert detail["scan_truncated"] is True
+    assert detail["skipped_records"] == 1
+
+
+def test_history_detail_counts_terminated_oversized_records_across_chunk_boundaries(
+    tmp_path,
+):
+    module = importlib.import_module("translator_runtime")
+    valid = b'{"time":"12:00:00","text":"valid"}\n'
+    skipped_counts = []
+
+    for index, record_size in enumerate((65537, 131071, 131072, 131073)):
+        session = tmp_path / f"session-{index}.jsonl"
+        session.write_bytes(valid + (b"x" * record_size) + b"\n")
+        detail = module.TranscriptHistoryReader(
+            tmp_path, session_limit=5, entry_limit=5,
+        ).read_session(session.name)
+        skipped_counts.append(detail["skipped_records"])
+        assert [entry["text"] for entry in detail["entries"]] == ["valid"]
+
+    assert skipped_counts == [1, 1, 1, 1]
+
+
+def test_history_detail_counts_a_terminated_oversized_record_past_its_byte_budget(
+    tmp_path,
+):
+    module = importlib.import_module("translator_runtime")
+    session = tmp_path / "session.jsonl"
+    session.write_bytes((b"x" * (4 * 1024 * 1024 + 1)) + b"\n")
+
+    detail = module.TranscriptHistoryReader(
+        tmp_path, session_limit=1, entry_limit=1,
+    ).read_session(session.name)
+
+    assert detail["entries"] == []
+    assert detail["entries_truncated"] is False
+    assert detail["scan_truncated"] is True
+    assert detail["skipped_records"] == 1
+
+
+def test_history_count_skips_an_oversized_entry_with_bounded_reads(tmp_path, monkeypatch):
     module = importlib.import_module("translator_runtime")
     session = tmp_path / "session.jsonl"
     session.touch()
     requested_sizes = []
+    payload = (
+        (b"x" * 65537) + b"\n"
+        b'{"time":"12:00:01","text":"valid"}\n'
+    )
 
     class OversizedEntry:
+        def __init__(self):
+            self.stream = BytesIO(payload)
+
         def __enter__(self):
             return self
 
@@ -171,14 +645,15 @@ def test_history_count_rejects_an_oversized_entry_with_a_bounded_read(tmp_path, 
 
         def readline(self, size=-1):
             requested_sizes.append(size)
-            return b"x" * size
+            return self.stream.readline(size)
 
     monkeypatch.setattr(Path, "open", lambda *_args, **_kwargs: OversizedEntry())
     reader = module.TranscriptHistoryReader(tmp_path, session_limit=1, entry_limit=1)
 
-    with pytest.raises(ValueError, match="exceeds the maximum"):
-        reader.list_sessions()
+    listing = reader.list_sessions()
 
+    assert listing["transcripts"][0]["count"] == 1
+    assert listing["transcripts"][0]["skipped_records"] == 1
     assert requested_sizes
     assert max(requested_sizes) <= 65538
 
@@ -314,6 +789,146 @@ def test_history_pages_make_session_count_and_detail_truncation_visible(tmp_path
     assert "recent entry four" in detail.text
     assert "excluded entry one" not in detail.text
     assert missing.status_code == 404
+
+
+def test_history_pages_disclose_skipped_records_without_hiding_other_sessions(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    application = importlib.import_module("app")
+    transcripts = tmp_path / "transcripts"
+    transcripts.mkdir()
+    damaged = transcripts / "2026-09-03_120000.jsonl"
+    damaged.write_bytes(
+        b'{"time":"12:00:00","text":"visible entry"}\n'
+        b'{damaged}\n'
+    )
+    write_session(transcripts / "2026-09-02_120000.jsonl", ["unaffected session"])
+
+    class Runtime(module.TranslatorRuntime):  # pylint: disable=too-few-public-methods
+        async def start(self):
+            return None
+
+    runtime = Runtime(module.RuntimeConfig.from_environment({}))
+    runtime.transcripts_dir = transcripts
+    runtime.templates = module.Jinja2Templates(
+        directory=str(Path(__file__).resolve().parents[1] / "templates"),
+    )
+
+    async def exercise():
+        app = application.create_app(lambda: runtime)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                return (
+                    await client.get("/history"),
+                    await client.get(f"/history/{damaged.name}"),
+                )
+
+    listing, detail = asyncio.run(exercise())
+    assert listing.status_code == 200
+    assert "September 02, 2026" in listing.text
+    assert "1 damaged record skipped" in listing.text
+    assert detail.status_code == 200
+    assert "visible entry" in detail.text
+    assert "1 damaged record skipped" in detail.text
+
+
+def test_history_listing_discloses_when_its_byte_budget_ends(tmp_path, monkeypatch):
+    module = importlib.import_module("translator_runtime")
+    application = importlib.import_module("app")
+    transcripts = tmp_path / "transcripts"
+    transcripts.mkdir()
+    (transcripts / "session.jsonl").write_bytes(b"\n" * 64)
+    monkeypatch.setattr(module.TranscriptHistoryReader, "_MAX_LIST_BYTES", 32)
+
+    class Runtime(module.TranslatorRuntime):  # pylint: disable=too-few-public-methods
+        async def start(self):
+            return None
+
+    runtime = Runtime(module.RuntimeConfig.from_environment({}))
+    runtime.transcripts_dir = transcripts
+    runtime.templates = module.Jinja2Templates(
+        directory=str(Path(__file__).resolve().parents[1] / "templates"),
+    )
+
+    async def exercise():
+        app = application.create_app(lambda: runtime)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                return await client.get("/history")
+
+    response = asyncio.run(exercise())
+    assert response.status_code == 200
+    assert "History inspection stopped at its read limit" in response.text
+
+
+def test_history_detail_route_skips_an_escaped_lone_surrogate(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    application = importlib.import_module("app")
+    transcripts = tmp_path / "transcripts"
+    transcripts.mkdir()
+    session = transcripts / "2026-09-03_120000.jsonl"
+    session.write_bytes(
+        b'{"time":"12:00:00","text":"visible entry"}\n'
+        b'{"time":"12:00:01","text":"\\ud800"}\n'
+    )
+
+    class Runtime(module.TranslatorRuntime):  # pylint: disable=too-few-public-methods
+        async def start(self):
+            return None
+
+    runtime = Runtime(module.RuntimeConfig.from_environment({}))
+    runtime.transcripts_dir = transcripts
+    runtime.templates = module.Jinja2Templates(
+        directory=str(Path(__file__).resolve().parents[1] / "templates"),
+    )
+
+    async def exercise():
+        app = application.create_app(lambda: runtime)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                return await client.get(f"/history/{session.name}")
+
+    response = asyncio.run(exercise())
+    assert response.status_code == 200
+    assert "visible entry" in response.text
+    assert "1 damaged record skipped" in response.text
+
+
+def test_history_detail_route_discloses_when_the_byte_scan_ends(tmp_path, monkeypatch):
+    module = importlib.import_module("translator_runtime")
+    application = importlib.import_module("app")
+    transcripts = tmp_path / "transcripts"
+    transcripts.mkdir()
+    session = transcripts / "session.jsonl"
+    session.write_bytes(b"x" * 64)
+    monkeypatch.setattr(module.TranscriptHistoryReader, "_MAX_DETAIL_BYTES", 32)
+
+    class Runtime(module.TranslatorRuntime):  # pylint: disable=too-few-public-methods
+        async def start(self):
+            return None
+
+    runtime = Runtime(module.RuntimeConfig.from_environment({}))
+    runtime.transcripts_dir = transcripts
+    runtime.templates = module.Jinja2Templates(
+        directory=str(Path(__file__).resolve().parents[1] / "templates"),
+    )
+
+    async def exercise():
+        app = application.create_app(lambda: runtime)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                return await client.get(f"/history/{session.name}")
+
+    response = asyncio.run(exercise())
+    assert response.status_code == 200
+    assert "Older history was not inspected because the read limit was reached" in response.text
 
 
 @pytest.mark.parametrize("route, reader_method", [
