@@ -31,6 +31,7 @@ from caption_translation import CaptionTranslationPolicy
 from language import LanguageOption
 from plugin_loader import load_plugins
 from transcript_events import process_transcript_text, queue_transcript_render_event
+from transcript_history import TranscriptHistoryReader
 from websocket_security import WebSocketOriginPolicy
 
 if TYPE_CHECKING:
@@ -55,6 +56,18 @@ class RuntimeConfig:  # pylint: disable=too-many-instance-attributes
     caption_concurrency: int = 1
     caption_queue_capacity: int = 2
     caption_retention_seconds: int = 86400
+    history_session_limit: int = 50
+    history_entry_limit: int = 500
+
+    @staticmethod
+    def _positive_integer(environ, variable: str, default: str) -> int:
+        try:
+            value = int(environ.get(variable, default))
+            if value <= 0:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError(f"{variable} must be a positive integer") from exc
+        return value
 
     @classmethod
     def from_environment(cls, environ):
@@ -101,9 +114,13 @@ class RuntimeConfig:  # pylint: disable=too-many-instance-attributes
             except ValueError as exc:
                 raise ValueError(f"{variable} must be a positive integer") from exc
             caption_settings.append(value)
+        history_settings = []
+        for name, default in (("SESSION_LIMIT", "50"), ("ENTRY_LIMIT", "500")):
+            variable = f"TRANSLATOR_HISTORY_{name}"
+            history_settings.append(cls._positive_integer(environ, variable, default))
         return cls(values["HOST"], port, values["MODEL"], values["DEVICE"],
                    values["BACKEND"], LanguageOption.from_env(environ), max_upload_bytes,
-                   allowed_origins, *caption_settings)
+                   allowed_origins, *caption_settings, *history_settings)
 
 
 class UploadTooLargeError(Exception):
@@ -401,59 +418,38 @@ class TranslatorRuntime:
         return self.templates.TemplateResponse(request=request, name="index.html")
 
     async def history(self, request: Request):
-        files = sorted(self.transcripts_dir.glob("*.jsonl"), reverse=True)
-        transcripts = []
-        for f in files:
-            entries = []
-            for line in f.read_text().strip().splitlines():
-                if line:
-                    entries.append(json.loads(line))
-            # Derive display name from filename: 2025-03-02_183045.jsonl
-            stem = f.stem  # e.g. "2025-03-02_183045"
-            try:
-                dt = datetime.strptime(stem, "%Y-%m-%d_%H%M%S")
-                label = dt.strftime("%B %d, %Y at %I:%M %p")
-            except ValueError:
-                label = stem
-            transcripts.append({
-                "filename": f.name,
-                "label": label,
-                "count": len(entries),
-            })
+        reader = TranscriptHistoryReader(
+            self.transcripts_dir, self.config.history_session_limit,
+            self.config.history_entry_limit,
+        )
+        history = await asyncio.to_thread(reader.list_sessions)
         return self.templates.TemplateResponse(request=request, name="history.html", context={
             "request": request,
-            "transcripts": transcripts,
+            **history,
         })
 
     async def view_transcript(self, request: Request, filename: str):
-        path = self.transcripts_dir / filename
-        if not path.exists() or not path.name.endswith(".jsonl"):
+        reader = TranscriptHistoryReader(
+            self.transcripts_dir, self.config.history_session_limit,
+            self.config.history_entry_limit,
+        )
+        detail = await asyncio.to_thread(reader.read_session, filename)
+        if detail is None:
             return HTMLResponse("Not found", status_code=404)
-        entries = []
-        for line in path.read_text().strip().splitlines():
-            if line:
-                entries.append(json.loads(line))
-        stem = path.stem
-        try:
-            dt = datetime.strptime(stem, "%Y-%m-%d_%H%M%S")
-            label = dt.strftime("%B %d, %Y at %I:%M %p")
-        except ValueError:
-            label = stem
-        audio_wav = self.transcripts_dir / f"{stem}.wav"
-        has_audio = audio_wav.exists()
         return self.templates.TemplateResponse(request=request, name="view.html", context={
             "request": request,
-            "label": label,
-            "entries": entries,
-            "has_audio": has_audio,
-            "audio_url": f"/audio/{stem}.wav" if has_audio else None,
+            **detail,
         })
 
     async def serve_audio(self, filename: str):
         if ".." in filename or "/" in filename:
             return JSONResponse({"error": "Invalid filename"}, status_code=400)
-        path = self.transcripts_dir / filename
-        if not path.exists():
+        reader = TranscriptHistoryReader(
+            self.transcripts_dir, self.config.history_session_limit,
+            self.config.history_entry_limit,
+        )
+        path = await asyncio.to_thread(reader.audio_file, filename)
+        if path is None:
             return JSONResponse({"error": "File not found"}, status_code=404)
         return FileResponse(path, filename=filename, media_type="audio/wav")
 

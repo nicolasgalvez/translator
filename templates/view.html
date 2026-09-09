@@ -78,6 +78,13 @@
             color: #666;
             margin-bottom: 0.15rem;
         }
+        .notice {
+            padding: 0.5rem 1rem;
+            background: #16213e;
+            color: #a0c4ff;
+            font-size: 0.85rem;
+            border-bottom: 1px solid #0f3460;
+        }
     </style>
 </head>
 <body>
@@ -92,6 +99,9 @@
     <div style="padding: 0.5rem 1rem; background: #16213e; border-bottom: 1px solid #0f3460;">
         <audio controls style="width: 100%; height: 36px;" src="{{ audio_url }}"></audio>
     </div>
+    {% endif %}
+    {% if entries_truncated %}
+    <div class="notice">Showing the {{ entry_limit }} most recent entries. Earlier entries are not displayed.</div>
     {% endif %}
     <div class="panels">
         <div class="panel es">
