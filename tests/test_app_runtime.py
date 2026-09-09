@@ -694,19 +694,17 @@ def test_caption_orphan_selection_cannot_delete_a_new_reservation(tmp_path, monk
     directory.mkdir(parents=True)
     os.utime(directory, (1, 1))
     inspected, release = threading.Event(), threading.Event()
-    original_stat = Path.stat
-    calls = []
+    original_clean_unowned = (
+        runtime.caption_manager._clean_unowned  # pylint: disable=protected-access
+    )
 
-    def paused_stat(path, *args, **kwargs):
-        result = original_stat(path, *args, **kwargs)
-        if path == directory and threading.current_thread().name == "orphan-sweep":
-            calls.append(True)
-            if len(calls) == 3:  # symlink check, directory check, then age selection
-                inspected.set()
-                assert release.wait(3)
-        return result
+    def paused_clean_unowned(selected_job_id):
+        if selected_job_id == job_id and threading.current_thread().name == "orphan-sweep":
+            inspected.set()
+            assert release.wait(3)
+        original_clean_unowned(selected_job_id)
 
-    monkeypatch.setattr(Path, "stat", paused_stat)
+    monkeypatch.setattr(runtime.caption_manager, "_clean_unowned", paused_clean_unowned)
     sweeper = threading.Thread(target=runtime.caption_manager.sweep, name="orphan-sweep")
     sweeper.start()
     try:
