@@ -9,7 +9,6 @@ import subprocess
 import threading
 import time
 import uuid
-import wave
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -26,6 +25,8 @@ from audio_pipeline import (
 )
 from caption_jobs import CaptionJobManager
 from caption_translation import CaptionTranslationPolicy
+from decoded_audio import DecodedAudioPolicy, DecodedAudioTooLargeError
+from decoded_audio import InvalidAudioMetadataError  # pylint: disable=unused-import
 from plugin_loader import load_plugins
 from runtime_config import RuntimeConfig
 from session_files import LiveSessionFiles
@@ -46,10 +47,6 @@ class UploadTooLargeError(Exception):
     """The uploaded file exceeds this runtime's configured byte limit."""
 
 
-class InvalidAudioMetadataError(ValueError):
-    """The extracted caption audio does not match the decoding contract."""
-
-
 # The runtime owns the existing application surface and its resources together.
 # pylint: disable=too-many-instance-attributes,too-many-public-methods
 class TranslatorRuntime:
@@ -65,6 +62,7 @@ class TranslatorRuntime:
         self.caption_manager = CaptionJobManager(self)
         self.caption_jobs = self.caption_manager.jobs
         self.caption_translation_policy = CaptionTranslationPolicy()
+        self.decoded_audio = DecodedAudioPolicy(config.max_decoded_audio_bytes)
         self._backend_lock = threading.Lock()
         self._translation_lock = threading.Lock()
         self.client_deliveries = WebSocketDeliveryRegistry(config.websocket_queue_capacity)
@@ -230,34 +228,7 @@ class TranslatorRuntime:
 
     def load_audio_16k(self, path: Path) -> np.ndarray:
         """Load mono 16kHz float32 audio extracted by the captions pipeline."""
-        import numpy as np
-
-        with wave.open(str(path), "rb") as wf:
-            sample_rate = wf.getframerate()
-            if sample_rate != 16000:
-                raise InvalidAudioMetadataError(
-                    f"Invalid extracted audio sample rate: got {sample_rate}, expected 16000",
-                )
-            channels = wf.getnchannels()
-            if channels != 1:
-                raise InvalidAudioMetadataError(
-                    f"Invalid extracted audio channels: got {channels}, expected 1",
-                )
-            sample_width = wf.getsampwidth()
-            if sample_width != 2:
-                raise InvalidAudioMetadataError(
-                    f"Invalid extracted audio sample width: got {sample_width}, expected 2",
-                )
-            frame_count = wf.getnframes()
-            expected_bytes = frame_count * channels * sample_width
-            frames = wf.readframes(frame_count + 1)
-            actual_bytes = len(frames)
-            if actual_bytes != expected_bytes:
-                raise InvalidAudioMetadataError(
-                    f"Invalid extracted audio frame data: got {actual_bytes} bytes, "
-                    f"expected {expected_bytes}",
-                )
-        return np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32767.0
+        return self.decoded_audio.load(path)
 
     def extract_text(self, segments) -> str:
         return " ".join(seg.text for seg in segments if seg.text)
@@ -494,8 +465,7 @@ class TranslatorRuntime:
     def extract_audio_16k(self, video_path: Path, audio_path: Path) -> str | None:
         """Extract mono 16kHz WAV from a video. Returns an error message, or None on success."""
         result = subprocess.run(
-            ["ffmpeg", "-i", str(video_path), "-vn", "-acodec", "pcm_s16le",
-             "-ar", "16000", "-ac", "1", str(audio_path), "-y"],
+            self.decoded_audio.ffmpeg_arguments(video_path, audio_path),
             capture_output=True, text=True, check=False,
         )
         if result.returncode != 0:
@@ -591,12 +561,12 @@ class TranslatorRuntime:
     def caption_worker(self, job_id: str, video_path: Path):
         job = self.caption_jobs[job_id]
         job_dir = self.captions_dir / job_id
+        audio_path = job_dir / "audio.wav"
 
         try:
             self._check_running()
             # Step 1: Extract audio with ffmpeg
             job.update(status="processing", progress=10, message="Extracting audio...")
-            audio_path = job_dir / "audio.wav"
             error = self.extract_audio_16k(video_path, audio_path)
             self._check_running()
             if error:
@@ -649,6 +619,10 @@ class TranslatorRuntime:
                 detected_language=summary,
             )
 
+        except DecodedAudioTooLargeError as error:
+            audio_path.unlink(missing_ok=True)
+            video_path.unlink(missing_ok=True)
+            job.update(status="error", message=str(error))
         # The job dict is the only channel back to the client, so report anything that fails.
         except Exception as e:  # pylint: disable=broad-exception-caught
             job.update(status="error", message=str(e)[:300])

@@ -209,6 +209,67 @@ def test_caption_worker_rejects_partial_pcm_frame_before_transcription(tmp_path)
     assert not transcribed
 
 
+def test_caption_worker_rejects_high_expansion_audio_and_cleans_artifacts(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video_path = job_dir / "video.upload"
+    video_path.write_bytes(b"compressed media")
+
+    class CaptionRuntime(module.TranslatorRuntime):
+        def extract_audio_16k(self, _video_path, audio_path):
+            write_wav(
+                audio_path,
+                frames=b"\x00\x00" * (self.decoded_audio.maximum_frames + 1),
+            )
+
+        def transcribe_segments(self, *_args):
+            raise AssertionError("transcription should not be called")
+
+    runtime = CaptionRuntime(module.RuntimeConfig.from_environment({
+        "TRANSLATOR_MAX_DECODED_AUDIO_BYTES": str(16000 * 2),
+    }))
+    runtime.captions_dir = tmp_path
+    runtime.caption_jobs["job"] = {"status": "queued", "files": []}
+
+    runtime.caption_worker("job", video_path)
+
+    job = runtime.caption_jobs["job"]
+    assert job["status"] == "error"
+    assert "decoded audio" in job["message"].lower()
+    assert "32000 bytes" in job["message"]
+    assert "TRANSLATOR_MAX_DECODED_AUDIO_BYTES" in job["message"]
+    assert not video_path.exists()
+    assert not (job_dir / "audio.wav").exists()
+
+
+def test_extract_audio_preserves_supported_media(tmp_path, monkeypatch):
+    module = importlib.import_module("translator_runtime")
+    input_path = tmp_path / "short.flac"
+    output_path = tmp_path / "short.wav"
+    input_path.write_bytes(b"supported media")
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({
+        "TRANSLATOR_MAX_DECODED_AUDIO_BYTES": str(16000 * 2),
+    }))
+
+    def run_decoder(arguments, **_options):
+        assert "aresample=16000,atrim=end_sample=16001" in arguments
+        assert arguments[-2] == str(output_path)
+        write_wav(output_path, frames=b"\x00\x00" * 8000)
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    monkeypatch.setattr(module.subprocess, "run", run_decoder)
+
+    assert runtime.extract_audio_16k(input_path, output_path) is None
+
+    with wave.open(str(output_path), "rb") as wav_file:
+        assert wav_file.getframerate() == 16000
+        assert wav_file.getnchannels() == 1
+        assert wav_file.getsampwidth() == 2
+        assert wav_file.getnframes() == 8000
+    assert runtime.load_audio_16k(output_path).shape == (8000,)
+
+
 @pytest.mark.parametrize("setting", ["CONCURRENCY", "QUEUE_CAPACITY", "RETENTION_SECONDS"])
 @pytest.mark.parametrize("value", ["0", "-1", "1.5", "bad", ""])
 def test_caption_lifecycle_configuration_rejects_invalid_values(setting, value):
@@ -1904,6 +1965,26 @@ def test_max_upload_configuration_rejects_invalid_limit(value):
     module = importlib.import_module("translator_runtime")
     with pytest.raises(ValueError, match="TRANSLATOR_MAX_UPLOAD_BYTES"):
         module.RuntimeConfig.from_environment({"TRANSLATOR_MAX_UPLOAD_BYTES": value})
+
+
+@pytest.mark.parametrize("environment, expected", [
+    ({}, 256 * 1024 * 1024),
+    ({"TRANSLATOR_MAX_DECODED_AUDIO_BYTES": "65536"}, 65536),
+])
+def test_decoded_audio_configuration_has_a_positive_pcm_byte_limit(environment, expected):
+    module = importlib.import_module("translator_runtime")
+
+    config = module.RuntimeConfig.from_environment(environment)
+
+    assert config.max_decoded_audio_bytes == expected
+
+
+@pytest.mark.parametrize("value", ["", " ", "invalid", "1.5", "0", "-1"])
+def test_decoded_audio_configuration_rejects_invalid_limits(value):
+    module = importlib.import_module("translator_runtime")
+
+    with pytest.raises(ValueError, match="TRANSLATOR_MAX_DECODED_AUDIO_BYTES"):
+        module.RuntimeConfig.from_environment({"TRANSLATOR_MAX_DECODED_AUDIO_BYTES": value})
 
 
 @pytest.fixture(name="upload_runtime")
