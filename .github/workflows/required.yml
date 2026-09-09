@@ -25,66 +25,47 @@ jobs:
       python_requirement: ${{ steps.classify.outputs.python_requirement }}
       dependency_audit: ${{ steps.classify.outputs.dependency_audit }}
     steps:
-      - name: Validate the synthetic merge SHA
-        id: candidate_input
-        env:
-          CANDIDATE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          case "$CANDIDATE_SHA" in
-            ""|*[!0-9a-fA-F]*)
-              echo "A valid synthetic merge SHA is required." >&2
-              exit 1
-              ;;
-          esac
-          if [ "${#CANDIDATE_SHA}" -ne 40 ]; then
-            echo "A full synthetic merge SHA is required." >&2
-            exit 1
-          fi
-          case "$HEAD_SHA" in
-            ""|*[!0-9a-fA-F]*)
-              echo "A valid PR head SHA is required." >&2
-              exit 1
-              ;;
-          esac
-          if [ "${#HEAD_SHA}" -ne 40 ]; then
-            echo "A full PR head SHA is required." >&2
-            exit 1
-          fi
-          printf 'sha=%s\n' "$CANDIDATE_SHA" >> "$GITHUB_OUTPUT"
-          printf 'head_sha=%s\n' "$HEAD_SHA" >> "$GITHUB_OUTPUT"
-
       - uses: actions/checkout@v7
         with:
+          repository: ${{ github.repository }}
           ref: ${{ github.event.pull_request.base.sha }}
           path: policy
           persist-credentials: false
-
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ steps.candidate_input.outputs.sha }}
-          path: candidate
-          persist-credentials: false
-          fetch-depth: 0
 
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
+      # pull_request_target does not populate merge_commit_sha.
+      # Resolve GitHub's base-repository merge ref, then pin the checked-out
+      # commit only after its event base/head parents have been validated.
+      - name: Resolve the base repository merge ref
+        id: candidate_input
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          python policy/scripts/ci_merge_candidate.py prepare
+          "$PR_NUMBER" "$BASE_SHA" "$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ steps.candidate_input.outputs.merge_ref }}
+          path: candidate
+          persist-credentials: false
+          fetch-depth: 0
+
       - name: Verify the candidate is the current synthetic merge
         id: validated_candidate
         env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          CANDIDATE_SHA: ${{ steps.candidate_input.outputs.sha }}
-          HEAD_SHA: ${{ steps.candidate_input.outputs.head_sha }}
-        run: |
-          actual_sha="$(git -C candidate rev-parse HEAD)"
-          test "$actual_sha" = "$CANDIDATE_SHA"
-          first_parent="$(git -C candidate rev-parse "${actual_sha}^1")"
-          test "$first_parent" = "$BASE_SHA"
-          second_parent="$(git -C candidate rev-parse "${actual_sha}^2")"
-          test "$second_parent" = "$HEAD_SHA"
-          printf 'sha=%s\n' "$actual_sha" >> "$GITHUB_OUTPUT"
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          python policy/scripts/ci_merge_candidate.py validate candidate
+          "$PR_NUMBER" "$BASE_SHA" "$HEAD_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Reject candidate-controlled pull request workflows
         run: >-
