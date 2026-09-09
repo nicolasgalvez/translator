@@ -4,11 +4,12 @@ import re
 import tomllib
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_MINIMUM = (3, 11)
-PYTHON_WORKFLOWS = ("pylint.yml", "pytest.yml")
 
 
 class PythonRequirementContractTests(unittest.TestCase):
@@ -21,10 +22,41 @@ class PythonRequirementContractTests(unittest.TestCase):
         }
         requirements.update(self._workflow_versions())
 
+        self.assertEqual(self._wrong_versions(requirements), {})
+
+    def test_new_setup_python_workflow_is_included_in_contract(self):
+        with TemporaryDirectory() as temporary_directory:
+            repository_root = Path(temporary_directory)
+            workflow_directory = repository_root / ".github" / "workflows"
+            workflow_directory.mkdir(parents=True)
+            for name, version in (
+                ("pylint.yml", "3.11"),
+                ("pytest.yml", "3.11"),
+                ("future.yaml", "3.10"),
+            ):
+                (workflow_directory / name).write_text(
+                    "uses: actions/setup-python@v7\n"
+                    f'python-version: "{version}"\n',
+                    encoding="utf-8",
+                )
+
+            with patch(f"{__name__}.REPOSITORY_ROOT", repository_root):
+                versions = self._workflow_versions()
+
+        future_workflow = ".github/workflows/future.yaml"
+        self.assertIn(future_workflow, versions)
         self.assertEqual(
-            requirements,
-            {name: EXPECTED_MINIMUM for name in requirements},
+            self._wrong_versions(versions),
+            {future_workflow: (3, 10)},
         )
+
+    @staticmethod
+    def _wrong_versions(requirements):
+        return {
+            name: version
+            for name, version in requirements.items()
+            if version != EXPECTED_MINIMUM
+        }
 
     def _pyproject_minimum(self):
         with (REPOSITORY_ROOT / "pyproject.toml").open("rb") as pyproject_file:
@@ -52,14 +84,13 @@ class PythonRequirementContractTests(unittest.TestCase):
         workflow_directory = REPOSITORY_ROOT / ".github" / "workflows"
         versions = {}
 
-        for workflow_name in PYTHON_WORKFLOWS:
-            workflow = workflow_directory / workflow_name
+        workflows = sorted(
+            (*workflow_directory.glob("*.yml"), *workflow_directory.glob("*.yaml"))
+        )
+        for workflow in workflows:
             content = workflow.read_text(encoding="utf-8")
-            self.assertIn(
-                "actions/setup-python@",
-                content,
-                f"{workflow.relative_to(REPOSITORY_ROOT)} must set up Python",
-            )
+            if "actions/setup-python@" not in content:
+                continue
 
             matches = re.findall(
                 r'^\s*python-version:\s*["\']?(\d+)\.(\d+)["\']?\s*$',
@@ -75,6 +106,7 @@ class PythonRequirementContractTests(unittest.TestCase):
                 map(int, matches[0])
             )
 
+        self.assertTrue(versions, "No maintained Python CI workflows were found")
         return versions
 
 
