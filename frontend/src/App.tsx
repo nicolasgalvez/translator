@@ -9,6 +9,7 @@ import "@/plugins/highlightKeyword"
 import type { TranscriptEvent, TranscriptMessage } from "@/types"
 
 type ConnectionState = "connected" | "disconnected"
+const LIVE_TRANSCRIPT_LIMIT = 500
 
 function websocketUrl() {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws"
@@ -38,10 +39,8 @@ function App() {
       ws.onmessage = (message) => {
         const payload = JSON.parse(message.data) as TranscriptMessage
         if (payload.type !== "transcript") return
-        setEvents((current) => [
-          ...current,
-          applyTranscriptFilters(payload.event),
-        ])
+        const event = applyTranscriptFilters(payload.event)
+        setEvents((current) => [...current, event].slice(-LIVE_TRANSCRIPT_LIMIT))
       }
     }
 

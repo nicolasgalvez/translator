@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react"
+import { act, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import App from "@/App"
@@ -34,6 +34,51 @@ describe("App", () => {
     expect(screen.getByText("Live Transcript")).toBeInTheDocument()
     expect(screen.getByText("Plugin Output")).toBeInTheDocument()
     expect(screen.getByText("Waiting for audio...")).toBeInTheDocument()
+  })
+
+  it("keeps rendering the newest 500 transcript events after reaching the limit", () => {
+    render(<App />)
+    const socket = MockWebSocket.instances[0]
+
+    act(() => socket.onopen?.())
+    expect(screen.getByText("connected")).toBeInTheDocument()
+
+    act(() => {
+      for (let index = 0; index <= 500; index += 1) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            type: "transcript",
+            event: {
+              id: String(index),
+              text: `message ${index}`,
+              time: `12:00:${String(index).padStart(2, "0")}`,
+            },
+          }),
+        } as MessageEvent)
+      }
+    })
+
+    let articles = screen.getAllByRole("article")
+    expect(articles).toHaveLength(500)
+    expect(articles[0]).toHaveTextContent("message 1")
+    expect(articles.at(-1)).toHaveTextContent("message 500")
+    expect(screen.queryByText("message 0")).not.toBeInTheDocument()
+
+    act(() => {
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: "transcript",
+          event: { id: "501", text: "message 501", time: "12:08:21" },
+        }),
+      } as MessageEvent)
+    })
+
+    articles = screen.getAllByRole("article")
+    expect(articles).toHaveLength(500)
+    expect(articles[0]).toHaveTextContent("message 2")
+    expect(articles.at(-1)).toHaveTextContent("message 501")
+    expect(screen.queryByText("message 1")).not.toBeInTheDocument()
+    expect(screen.getByText("connected")).toBeInTheDocument()
   })
 })
 

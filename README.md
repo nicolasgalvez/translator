@@ -120,6 +120,10 @@ Frontend plugins register transcript filters and main-pane renderers through `fr
 
 Captures the selected audio input in real time, transcribes Spanish with Whisper, saves transcript JSONL entries, and broadcasts transcript events to the React UI.
 
+The live React interface retains the 500 newest transcript events in arrival order.
+When a new event arrives at the limit, it evicts the oldest event; transcript and
+plugin rendering use only this bounded state.
+
 Capture, chunking, and inference run in separate workers. Live audio buffering has
 fixed limits at 48 kHz mono float32:
 
@@ -172,6 +176,17 @@ Origin, so restrict network access to trusted clients.
 ### Transcript History (`/history`)
 
 Browse saved transcript sessions. Each session saves a `.jsonl` transcript and a `.wav` audio recording.
+
+History shows the 50 newest sessions and the 500 most recent entries in a session
+by default. Truncated session lists, entry counts, and detail views are labeled in
+the interface. Detail reads inspect at most the newest 4 MiB, and each JSONL entry
+is limited to 64 KiB so a damaged or oversized record cannot force an unbounded
+allocation. Set positive integer limits with
+`TRANSLATOR_HISTORY_SESSION_LIMIT` and `TRANSLATOR_HISTORY_ENTRY_LIMIT`, for example:
+
+```bash
+TRANSLATOR_HISTORY_SESSION_LIMIT=25 TRANSLATOR_HISTORY_ENTRY_LIMIT=200 ./run.sh
+```
 
 ### Video Captions (`/captions`)
 
