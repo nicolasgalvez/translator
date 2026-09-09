@@ -301,7 +301,7 @@ it("keeps setup docs, package metadata, CI, and Docker on the supported policy",
 it("runs the Node contract when any maintained declaration changes", () => {
   const frontendWorkflow = read(".github/workflows/frontend.yml")
   const pathBlock = frontendWorkflow.match(
-    /paths: &frontend_paths\n(?<paths>(?:\s+- .+\n)+)/,
+    /    paths:\n(?<paths>(?:\s+- .+\n)+)/,
   )?.groups?.paths
 
   for (const path of ["Dockerfile", "README.md", "run.sh"]) {

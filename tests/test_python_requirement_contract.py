@@ -37,7 +37,7 @@ class PythonRequirementContractTests(unittest.TestCase):
         content = workflow.read_text(encoding="utf-8")
 
         for fragment in (
-            "  pull_request:",
+            "  workflow_call:",
             "  push:",
             "    branches: [main]",
             '      - "README.md"',

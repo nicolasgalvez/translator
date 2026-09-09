@@ -7,8 +7,6 @@ on:
   push:
     branches: [main]
     paths-ignore: ["**/*.md", "docs/**"]
-  pull_request:
-    paths-ignore: ["**/*.md", "docs/**"]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -20,7 +18,13 @@ permissions:
 jobs:
   workflow-syntax:
     uses: ./.github/workflows/actionlint.yml
+    with:
+      candidate_sha: ${{ github.sha }}
   lint:
     uses: ./.github/workflows/pylint.yml
+    with:
+      candidate_sha: ${{ github.sha }}
   test:
     uses: ./.github/workflows/pytest.yml
+    with:
+      candidate_sha: ${{ github.sha }}

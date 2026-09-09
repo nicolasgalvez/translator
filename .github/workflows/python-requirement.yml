@@ -1,22 +1,25 @@
 name: Python Requirement
 
 on:
-  pull_request:
-    paths: &python_requirement_paths
+  workflow_call:
+    inputs:
+      candidate_sha:
+        required: true
+        type: string
+  push:
+    branches: [main]
+    paths:
       - "README.md"
       - "pyproject.toml"
       - "tests/test_python_requirement_contract.py"
       - ".github/workflows/*.yml"
       - ".github/workflows/*.yaml"
-  push:
-    branches: [main]
-    paths: *python_requirement_paths
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-python-requirement-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -26,6 +29,9 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
+          persist-credentials: false
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"

@@ -1,0 +1,257 @@
+name: Required
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  classify:
+    name: classify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      candidate_sha: ${{ steps.validated_candidate.outputs.sha }}
+      python: ${{ steps.classify.outputs.python }}
+      frontend: ${{ steps.classify.outputs.frontend }}
+      docker: ${{ steps.classify.outputs.docker }}
+      workflow_lint: ${{ steps.classify.outputs.workflow_lint }}
+      python_requirement: ${{ steps.classify.outputs.python_requirement }}
+      dependency_audit: ${{ steps.classify.outputs.dependency_audit }}
+    steps:
+      - name: Validate the synthetic merge SHA
+        id: candidate_input
+        env:
+          CANDIDATE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          case "$CANDIDATE_SHA" in
+            ""|*[!0-9a-fA-F]*)
+              echo "A valid synthetic merge SHA is required." >&2
+              exit 1
+              ;;
+          esac
+          if [ "${#CANDIDATE_SHA}" -ne 40 ]; then
+            echo "A full synthetic merge SHA is required." >&2
+            exit 1
+          fi
+          case "$HEAD_SHA" in
+            ""|*[!0-9a-fA-F]*)
+              echo "A valid PR head SHA is required." >&2
+              exit 1
+              ;;
+          esac
+          if [ "${#HEAD_SHA}" -ne 40 ]; then
+            echo "A full PR head SHA is required." >&2
+            exit 1
+          fi
+          printf 'sha=%s\n' "$CANDIDATE_SHA" >> "$GITHUB_OUTPUT"
+          printf 'head_sha=%s\n' "$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: policy
+          persist-credentials: false
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.candidate_input.outputs.sha }}
+          path: candidate
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Verify the candidate is the current synthetic merge
+        id: validated_candidate
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CANDIDATE_SHA: ${{ steps.candidate_input.outputs.sha }}
+          HEAD_SHA: ${{ steps.candidate_input.outputs.head_sha }}
+        run: |
+          actual_sha="$(git -C candidate rev-parse HEAD)"
+          test "$actual_sha" = "$CANDIDATE_SHA"
+          first_parent="$(git -C candidate rev-parse "${actual_sha}^1")"
+          test "$first_parent" = "$BASE_SHA"
+          second_parent="$(git -C candidate rev-parse "${actual_sha}^2")"
+          test "$second_parent" = "$HEAD_SHA"
+          printf 'sha=%s\n' "$actual_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Reject candidate-controlled pull request workflows
+        run: >-
+          python policy/scripts/validate_workflow_triggers.py
+          candidate/.github/workflows
+
+      - name: Classify changed paths
+        id: classify
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CANDIDATE_SHA: ${{ steps.validated_candidate.outputs.sha }}
+        run: |
+          set -o pipefail
+          git -C candidate diff --no-renames --name-only -z \
+            "$BASE_SHA" "$CANDIDATE_SHA" \
+            | python policy/scripts/ci_path_classifier.py >> "$GITHUB_OUTPUT"
+
+  python_test:
+    if: needs.classify.outputs.python == 'true'
+    needs: classify
+    uses: ./.github/workflows/pytest.yml
+    with:
+      candidate_sha: ${{ needs.classify.outputs.candidate_sha }}
+
+  python_lint:
+    if: needs.classify.outputs.python == 'true'
+    needs: classify
+    uses: ./.github/workflows/pylint.yml
+    with:
+      candidate_sha: ${{ needs.classify.outputs.candidate_sha }}
+
+  frontend:
+    if: needs.classify.outputs.frontend == 'true'
+    needs: classify
+    uses: ./.github/workflows/frontend.yml
+    with:
+      candidate_sha: ${{ needs.classify.outputs.candidate_sha }}
+
+  docker:
+    if: needs.classify.outputs.docker == 'true'
+    needs: classify
+    uses: ./.github/workflows/docker.yml
+    with:
+      candidate_sha: ${{ needs.classify.outputs.candidate_sha }}
+
+  workflow_lint:
+    if: needs.classify.outputs.workflow_lint == 'true'
+    needs: classify
+    uses: ./.github/workflows/actionlint.yml
+    with:
+      candidate_sha: ${{ needs.classify.outputs.candidate_sha }}
+
+  python_requirement:
+    if: needs.classify.outputs.python_requirement == 'true'
+    needs: classify
+    uses: ./.github/workflows/python-requirement.yml
+    with:
+      candidate_sha: ${{ needs.classify.outputs.candidate_sha }}
+
+  dependency_audit:
+    if: needs.classify.outputs.dependency_audit == 'true'
+    needs: classify
+    uses: ./.github/workflows/dependency-audit.yml
+    with:
+      candidate_sha: ${{ needs.classify.outputs.candidate_sha }}
+
+  required:
+    name: policy-gate
+    if: always()
+    needs:
+      - classify
+      - python_test
+      - python_lint
+      - frontend
+      - docker
+      - workflow_lint
+      - python_requirement
+      - dependency_audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CLASSIFY_RESULT: ${{ needs.classify.result }}
+      PYTHON_REQUIRED: ${{ needs.classify.outputs.python }}
+      PYTHON_TEST_RESULT: ${{ needs.python_test.result }}
+      PYTHON_LINT_RESULT: ${{ needs.python_lint.result }}
+      FRONTEND_REQUIRED: ${{ needs.classify.outputs.frontend }}
+      FRONTEND_RESULT: ${{ needs.frontend.result }}
+      DOCKER_REQUIRED: ${{ needs.classify.outputs.docker }}
+      DOCKER_RESULT: ${{ needs.docker.result }}
+      WORKFLOW_LINT_REQUIRED: ${{ needs.classify.outputs.workflow_lint }}
+      WORKFLOW_LINT_RESULT: ${{ needs.workflow_lint.result }}
+      PYTHON_REQUIREMENT_REQUIRED: ${{ needs.classify.outputs.python_requirement }}
+      PYTHON_REQUIREMENT_RESULT: ${{ needs.python_requirement.result }}
+      DEPENDENCY_AUDIT_REQUIRED: ${{ needs.classify.outputs.dependency_audit }}
+      DEPENDENCY_AUDIT_RESULT: ${{ needs.dependency_audit.result }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: policy
+          persist-credentials: false
+      - name: Enforce applicable suite results
+        run: python policy/scripts/ci_result_gate.py
+
+  # GitHub evaluates a required check on its test merge commit when one exists.
+  # Publish only on the exact merge SHA whose base/head parents were validated
+  # above; using the PR head SHA would allow stale or cross-base results
+  # and is ambiguous for fork commits in the base repository.
+  publish_required:
+    name: publish-required
+    if: always()
+    needs:
+      - classify
+      - required
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      checks: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      CANDIDATE_SHA: ${{ needs.classify.outputs.candidate_sha }}
+      CLASSIFY_RESULT: ${{ needs.classify.result }}
+      GATE_RESULT: ${{ needs.required.result }}
+    steps:
+      - name: Publish the required check on the synthetic merge
+        run: |
+          if [ "$CLASSIFY_RESULT" != "success" ]; then
+            echo "Classification did not produce a trusted candidate SHA." >&2
+            exit 1
+          fi
+          case "$CANDIDATE_SHA" in
+            ""|*[!0-9a-fA-F]*)
+              echo "Cannot publish without a validated candidate SHA." >&2
+              exit 1
+              ;;
+          esac
+          if [ "${#CANDIDATE_SHA}" -ne 40 ]; then
+            echo "Cannot publish without a validated candidate SHA." >&2
+            exit 1
+          fi
+
+          CONCLUSION="failure"
+          SUMMARY="Trusted CI policy did not pass."
+          if [ "$CLASSIFY_RESULT" = "success" ] \
+            && [ "$GATE_RESULT" = "success" ]; then
+            CONCLUSION="success"
+            SUMMARY="Trusted CI policy passed."
+          fi
+
+          payload="$(jq -n \
+            --arg head_sha "$CANDIDATE_SHA" \
+            --arg conclusion "$CONCLUSION" \
+            --arg summary "$SUMMARY" \
+            '{
+              "name": "required",
+              "head_sha": $head_sha,
+              "status": "completed",
+              "conclusion": $conclusion,
+              "output": {
+                "title": "Required CI gate",
+                "summary": $summary
+              }
+            }')"
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --url "https://api.github.com/repos/$GITHUB_REPOSITORY/check-runs" \
+            --data "$payload"
