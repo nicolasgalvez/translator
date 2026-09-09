@@ -9,6 +9,10 @@ const template = readFileSync(
   resolve(process.cwd(), "../templates/captions.html"),
   "utf8",
 )
+const frontendWorkflow = readFileSync(
+  resolve(process.cwd(), "../.github/workflows/frontend.yml"),
+  "utf8",
+)
 const pages = []
 
 function createPage() {
@@ -22,6 +26,15 @@ function createPage() {
 
 afterEach(() => {
   for (const page of pages.splice(0)) page.window.close()
+})
+
+it("runs frontend CI when the caption template changes", () => {
+  const pathBlock = frontendWorkflow.match(
+    /paths: &frontend_paths\n(?<paths>(?:\s+- .+\n)+)/,
+  )?.groups?.paths
+
+  expect(pathBlock).toContain('- "templates/captions.html"')
+  expect(frontendWorkflow).toContain("paths: *frontend_paths")
 })
 
 describe("caption controls", () => {
