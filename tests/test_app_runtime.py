@@ -232,17 +232,18 @@ def test_upload_checks_size_before_writing_and_closes_rejection(upload_runtime, 
 
 
 @pytest.mark.parametrize("content_length", [None, "1", "1000000000"])
+@pytest.mark.parametrize("deployment_prefix", ["", "/api"], ids=["root", "prefixed"])
 def test_upload_request_limit_stops_multipart_spooling(
-    upload_runtime, monkeypatch, content_length,
+    upload_runtime, monkeypatch, content_length, deployment_prefix,
 ):
     runtime, entered, _inputs = upload_runtime
     application = importlib.import_module("app").create_app()
     application.state.runtime = runtime
     parser_module = importlib.import_module("starlette.formparsers")
-    original_spool = parser_module.SpooledTemporaryFile
     observed = SimpleNamespace(spools=[], consumed=0, handler_entered=False)
 
-    class ObservedSpool(original_spool):  # pylint: disable=too-few-public-methods
+    class ObservedSpool(parser_module.SpooledTemporaryFile):
+        # pylint: disable=too-few-public-methods
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.saved_size = 0
@@ -275,10 +276,11 @@ def test_upload_request_limit_stops_multipart_spooling(
         if content_length is not None:
             headers["content-length"] = content_length
         async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=application), base_url="http://test",
+            transport=httpx.ASGITransport(app=application, root_path=deployment_prefix),
+            base_url="http://test",
         ) as client:
             response = await client.post(
-                "/captions/upload", headers=headers, content=multipart_body(),
+                f"{deployment_prefix}/captions/upload", headers=headers, content=multipart_body(),
             )
         assert response.status_code == 413
         assert response.json() == {"error": "Upload exceeds maximum size of 1048579 bytes"}

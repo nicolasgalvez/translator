@@ -4,6 +4,7 @@ from contextlib import suppress
 
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
+from starlette._utils import get_route_path
 
 
 class UploadRequestTooLargeError(HTTPException):
@@ -30,7 +31,7 @@ class CaptionUploadLimitMiddleware:  # pylint: disable=too-few-public-methods
 
     async def __call__(self, scope, receive, send):
         if (scope["type"] != "http" or scope["method"] != "POST"
-                or scope["path"] != "/captions/upload"):
+                or get_route_path(scope) != "/captions/upload"):
             await self.app(scope, receive, send)
             return
 
