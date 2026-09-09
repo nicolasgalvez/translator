@@ -2,7 +2,7 @@
 
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import heapq
 import json
 import logging
@@ -35,6 +35,11 @@ class TranscriptHistoryReader:
     # bytes needed to count the default 500-entry view plus one.
     _MAX_LIST_BYTES = 64 * 1024 * 1024
     _AUDIO_PART_NUMBER = re.compile(r"[0-9]{3,}")
+    _UTC_SESSION_STEM = re.compile(
+        r"(?P<utc>[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}_[0-9]{6})Z--"
+        r"(?P<local>[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}_[0-9]{6})"
+        r"(?P<offset>[+-][0-9]{4})-(?P<zone>[A-Za-z0-9+-]{1,16})--[0-9a-f]{16}"
+    )
 
     def __init__(self, directory: Path, session_limit: int, entry_limit: int):
         self.directory = directory
@@ -50,7 +55,7 @@ class TranscriptHistoryReader:
             candidates = heapq.nlargest(
                 self.session_limit + 1,
                 self._session_files(root),
-                key=lambda candidate: candidate[0].name,
+                key=lambda candidate: self._session_order(candidate[0]),
             )
         sessions_truncated = len(candidates) > self.session_limit
         transcripts = []
@@ -335,8 +340,39 @@ class TranscriptHistoryReader:
 
     @staticmethod
     def _label(stem: str) -> str:
+        match = TranscriptHistoryReader._UTC_SESSION_STEM.fullmatch(stem)
+        if match is not None:
+            try:
+                timestamp = datetime.strptime(
+                    match.group("local"), "%Y-%m-%d_%H%M%S_%f",
+                )
+                offset = match.group("offset")
+                return (
+                    timestamp.strftime("%B %d, %Y at %I:%M %p ")
+                    + match.group("zone")
+                    + f" (UTC{offset[:3]}:{offset[3:]})"
+                )
+            except ValueError:
+                return stem
         try:
             timestamp = datetime.strptime(stem, "%Y-%m-%d_%H%M%S")
             return timestamp.strftime("%B %d, %Y at %I:%M %p")
         except ValueError:
             return stem
+
+    @classmethod
+    def _session_order(cls, path: Path) -> tuple[datetime, str]:
+        stem = path.stem
+        match = cls._UTC_SESSION_STEM.fullmatch(stem)
+        try:
+            if match is not None:
+                timestamp = datetime.strptime(
+                    match.group("utc"), "%Y-%m-%d_%H%M%S_%f",
+                ).replace(tzinfo=timezone.utc)
+            else:
+                timestamp = datetime.strptime(
+                    stem, "%Y-%m-%d_%H%M%S",
+                ).astimezone(timezone.utc)
+        except ValueError:
+            timestamp = datetime.min.replace(tzinfo=timezone.utc)
+        return timestamp, path.name
