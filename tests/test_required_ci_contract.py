@@ -49,7 +49,8 @@ def test_classifier_uses_the_exact_pull_request_range_and_nul_paths():
     workflow = read_workflow("required.yml")
 
     assert "github.event.pull_request.base.sha" in workflow
-    assert "github.event.pull_request.merge_commit_sha" in workflow
+    assert "github.event.pull_request.head.sha" in workflow
+    assert "github.event.pull_request.merge_commit_sha" not in workflow
     assert "git -C candidate diff --no-renames --name-only -z" in workflow
     assert "python policy/scripts/ci_path_classifier.py" in workflow
     assert '>> "$GITHUB_OUTPUT"' in workflow
@@ -59,15 +60,15 @@ def test_controller_separates_trusted_policy_from_the_candidate_checkout():
     workflow = read_workflow("required.yml")
 
     assert "ref: ${{ github.event.pull_request.base.sha }}" in workflow
+    assert workflow.count("repository: ${{ github.repository }}") == 2
     assert "path: policy" in workflow
     assert "path: candidate" in workflow
     assert "persist-credentials: false" in workflow
-    assert "ref: ${{ steps.candidate_input.outputs.sha }}" in workflow
-    assert '""|*[!0-9a-fA-F]*)' in workflow
-    assert '[ "${#CANDIDATE_SHA}" -ne 40 ]' in workflow
-    assert 'test "$actual_sha" = "$CANDIDATE_SHA"' in workflow
-    assert 'test "$first_parent" = "$BASE_SHA"' in workflow
-    assert 'test "$second_parent" = "$HEAD_SHA"' in workflow
+    assert "ref: ${{ steps.candidate_input.outputs.merge_ref }}" in workflow
+    assert "PR_NUMBER: ${{ github.event.pull_request.number }}" in workflow
+    assert "python policy/scripts/ci_merge_candidate.py prepare" in workflow
+    assert "python policy/scripts/ci_merge_candidate.py validate" in workflow
+    assert "candidate/.github/workflows" in workflow
     assert "candidate_sha: ${{ steps.validated_candidate.outputs.sha }}" in workflow
     assert "head_sha: ${{" not in workflow
     assert "candidate_sha: ${{ needs.classify.outputs.candidate_sha }}" in workflow
@@ -283,13 +284,23 @@ def test_validated_merge_identity_prevents_stale_or_cross_base_publication():
     classifier = workflow.split("  python_test:", maxsplit=1)[0]
     publisher = workflow.split("  publish_required:", maxsplit=1)[1]
 
-    assert 'test "$actual_sha" = "$CANDIDATE_SHA"' in classifier
-    assert 'test "$first_parent" = "$BASE_SHA"' in classifier
-    assert 'test "$second_parent" = "$HEAD_SHA"' in classifier
+    assert '"$PR_NUMBER" "$BASE_SHA" "$HEAD_SHA"' in classifier
+    assert "python policy/scripts/ci_merge_candidate.py validate" in classifier
+    assert "ref: ${{ steps.candidate_input.outputs.merge_ref }}" in classifier
     assert "id: validated_candidate" in classifier
     assert "CANDIDATE_SHA: ${{ needs.classify.outputs.candidate_sha }}" in publisher
     assert "github.event.pull_request.head.sha" not in publisher
     assert "github.event.pull_request.merge_commit_sha" not in publisher
+
+
+def test_candidate_sha_is_derived_from_the_checked_out_base_repository_merge_ref():
+    workflow = read_workflow("required.yml")
+    classifier = workflow.split("  python_test:", maxsplit=1)[0]
+
+    assert "steps.candidate_input.outputs.merge_ref" in classifier
+    assert "github.event.pull_request.merge_commit_sha" not in classifier
+    assert "candidate_input.outputs.sha" not in classifier
+    assert '"$PR_NUMBER" "$BASE_SHA" "$HEAD_SHA"' in classifier
 
 
 def test_jira_failure_reporting_observes_the_required_workflow():
