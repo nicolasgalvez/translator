@@ -145,40 +145,56 @@ class TranslatorRuntime:
     async def stop(self):
         """Signal workers and bound joins so an external inference cannot hang shutdown."""
         self._stopping.set()
-        await asyncio.to_thread(self._wait_for_transcript_commit)
+        errors = []
+        with self._capture_cleanup_error(errors):
+            await asyncio.to_thread(self._wait_for_transcript_commit)
         if self.broadcast_task is not None:
-            self.broadcast_task.cancel()
-            try:
-                await self.broadcast_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-                print(f"Broadcast task failed: {exc}", flush=True)
-        if self.audio_stream is not None:
-            with suppress(Exception):
-                self.audio_stream.abort()
-        await asyncio.to_thread(self._join_workers)
+            with self._capture_cleanup_error(errors):
+                self.broadcast_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self.broadcast_task
+        stream = self.audio_stream
+        if stream is not None:
+            with self._capture_cleanup_error(errors):
+                stream.abort()
+        with self._capture_cleanup_error(errors):
+            await asyncio.to_thread(self._join_workers)
         # In-flight operations retain local references until they return.
         self.backend = None
-        if self.audio_stream is not None:
-            with suppress(Exception):
-                self.audio_stream.close()
-            self.audio_stream = None
-        with self.wav_lock:
-            if self.wav_writer is not None:
-                self.wav_writer.close()
-                self.wav_writer = None
+        self.audio_stream = None
+        if stream is not None:
+            with self._capture_cleanup_error(errors):
+                stream.close()
+        with self._capture_cleanup_error(errors):
+            with self.wav_lock:
+                writer, self.wav_writer = self.wav_writer, None
+                if writer is not None:
+                    writer.close()
         clients, self.clients = self.clients[:], []
         for client in clients:
-            with suppress(Exception):
+            with self._capture_cleanup_error(errors):
                 await asyncio.wait_for(client.close(), timeout=1)
+        if errors:
+            raise errors[0]
+
+    @contextmanager
+    def _capture_cleanup_error(self, errors):
+        """Defer a cleanup error until every remaining resource has been attempted."""
+        try:
+            yield
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            errors.append(exc)
 
     def _join_workers(self):
         deadline = time.monotonic() + 2
+        errors = []
         for worker in self.worker_threads:
-            worker.join(timeout=max(0, deadline - time.monotonic()))
-            if worker.is_alive():
-                print(f"Worker still finishing during shutdown: {worker.name}", flush=True)
+            with self._capture_cleanup_error(errors):
+                worker.join(timeout=max(0, deadline - time.monotonic()))
+                if worker.is_alive():
+                    print(f"Worker still finishing during shutdown: {worker.name}", flush=True)
+        if errors:
+            raise errors[0]
 
     def _check_running(self):
         if self._stopping.is_set():
@@ -653,8 +669,8 @@ class TranslatorRuntime:
         thread = threading.Thread(
             target=self.caption_worker, args=(job_id, video_path), daemon=True,
         )
-        self.worker_threads.append(thread)
         thread.start()
+        self.worker_threads.append(thread)
 
         return JSONResponse({"job_id": job_id})
 

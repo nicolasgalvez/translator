@@ -3,6 +3,7 @@
 import asyncio
 import gc
 import importlib
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,7 @@ import weakref
 import pytest
 import httpx
 import numpy as np
+from starlette.websockets import WebSocketState
 
 from hooks import add_action, add_filter, clear_hooks
 
@@ -490,7 +492,11 @@ def test_runtime_shutdown_closes_owned_resources(tmp_path, monkeypatch, broadcas
             runtime.text_queue.put({"not_serializable": {1, 2}})
             await asyncio.sleep(0.2)
             assert runtime.broadcast_task.done()
-        await asyncio.wait_for(runtime.stop(), timeout=3)
+        if broadcast_failure:
+            with pytest.raises(TypeError, match="not JSON serializable"):
+                await asyncio.wait_for(runtime.stop(), timeout=3)
+        else:
+            await asyncio.wait_for(runtime.stop(), timeout=3)
         assert all(not thread.is_alive() for thread in runtime.worker_threads)
         assert runtime.broadcast_task.done()
         assert stream_closed.is_set()
@@ -500,6 +506,92 @@ def test_runtime_shutdown_closes_owned_resources(tmp_path, monkeypatch, broadcas
             assert (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) == (
                 1, 2, 48000,
             )
-        await runtime.stop()
+        if not broadcast_failure:
+            await runtime.stop()
+
+    asyncio.run(exercise())
+
+
+class FailingAudioStream:
+    def __init__(self, abort_error=None):
+        self.aborted = False
+        self.closed = False
+        self.abort_error = abort_error
+
+    def abort(self):
+        self.aborted = True
+        if self.abort_error is not None:
+            raise self.abort_error
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.mark.parametrize("failure", ["caption_thread_start", "wav_close", "abort_and_wav_close"])
+def test_cleanup_continues_after_a_resource_failure(tmp_path, monkeypatch, failure):
+    module = importlib.import_module("translator_runtime")
+    first_error = OSError(
+        "abort failed" if failure == "abort_and_wav_close" else "WAV close failed",
+    )
+
+    async def exercise():
+        runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+        runtime.backend = object()
+        runtime.captions_dir = tmp_path / "captions"
+        runtime.audio_file = tmp_path / "session.wav"
+        runtime.wav_writer = wave.Wave_write(str(runtime.audio_file))
+        runtime.wav_writer.setnchannels(1)
+        runtime.wav_writer.setsampwidth(2)
+        runtime.wav_writer.setframerate(48000)
+        stream = FailingAudioStream(first_error if failure == "abort_and_wav_close" else None)
+        runtime.audio_stream = stream
+        runtime.broadcast_task = asyncio.create_task(runtime.broadcast_loop())
+
+        async def receive():
+            return {"type": "websocket.connect"}
+
+        async def send(_message):
+            pass
+
+        client = module.WebSocket({"type": "websocket"}, receive, send)
+        await client.accept()
+        runtime.clients.append(client)
+        if failure == "caption_thread_start":
+            original_start = threading.Thread.start
+
+            def fail_caption_start(thread):
+                if thread._target == runtime.caption_worker:  # pylint: disable=protected-access
+                    raise RuntimeError("caption thread could not start")
+                original_start(thread)
+
+            monkeypatch.setattr(threading.Thread, "start", fail_caption_start)
+            upload = module.UploadFile(BytesIO(b"video"), filename="video.mp4")
+            with pytest.raises(RuntimeError, match="caption thread could not start"):
+                await runtime.captions_upload(upload)
+            await runtime.stop()
+            assert not runtime.worker_threads
+        else:
+            original_close = runtime.wav_writer.close
+
+            def fail_wav_close():
+                original_close()
+                if failure == "wav_close":
+                    raise first_error
+                raise OSError("later WAV close failure")
+
+            monkeypatch.setattr(runtime.wav_writer, "close", fail_wav_close)
+            with pytest.raises(OSError) as caught:
+                await runtime.stop()
+            assert caught.value is first_error
+
+        assert stream.aborted and stream.closed
+        assert runtime.audio_stream is None
+        assert runtime.wav_writer is None
+        assert runtime.backend is None
+        assert runtime.broadcast_task.done()
+        assert not runtime.clients
+        assert client.application_state is WebSocketState.DISCONNECTED
+        with wave.open(str(runtime.audio_file), "rb") as audio:
+            assert audio.getframerate() == 48000
 
     asyncio.run(exercise())
