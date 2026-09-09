@@ -133,6 +133,10 @@ class UploadTooLargeError(Exception):
     """The uploaded file exceeds this runtime's configured byte limit."""
 
 
+class InvalidAudioMetadataError(ValueError):
+    """The extracted caption audio does not match the decoding contract."""
+
+
 # The runtime owns the existing application surface and its resources together.
 # pylint: disable=too-many-instance-attributes,too-many-public-methods
 class TranslatorRuntime:
@@ -305,9 +309,30 @@ class TranslatorRuntime:
         import numpy as np
 
         with wave.open(str(path), "rb") as wf:
-            assert wf.getframerate() == 16000, f"Expected 16kHz, got {wf.getframerate()}"
-            assert wf.getnchannels() == 1
-            frames = wf.readframes(wf.getnframes())
+            sample_rate = wf.getframerate()
+            if sample_rate != 16000:
+                raise InvalidAudioMetadataError(
+                    f"Invalid extracted audio sample rate: got {sample_rate}, expected 16000",
+                )
+            channels = wf.getnchannels()
+            if channels != 1:
+                raise InvalidAudioMetadataError(
+                    f"Invalid extracted audio channels: got {channels}, expected 1",
+                )
+            sample_width = wf.getsampwidth()
+            if sample_width != 2:
+                raise InvalidAudioMetadataError(
+                    f"Invalid extracted audio sample width: got {sample_width}, expected 2",
+                )
+            frame_count = wf.getnframes()
+            expected_bytes = frame_count * channels * sample_width
+            frames = wf.readframes(frame_count + 1)
+            actual_bytes = len(frames)
+            if actual_bytes != expected_bytes:
+                raise InvalidAudioMetadataError(
+                    f"Invalid extracted audio frame data: got {actual_bytes} bytes, "
+                    f"expected {expected_bytes}",
+                )
         return np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32767.0
 
     def extract_text(self, segments) -> str:
