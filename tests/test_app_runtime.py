@@ -2189,6 +2189,99 @@ def test_upload_request_limit_stops_multipart_spooling(
     asyncio.run(exercise())
 
 
+def test_caption_admission_precedes_concurrent_multipart_parsing(  # pylint: disable=too-many-statements
+    tmp_path, monkeypatch,
+):
+    """A full request queue rejects the next body before Starlette reads it."""
+    module = importlib.import_module("translator_runtime")
+    application = importlib.import_module("app").create_app()
+
+    class AdmissionRuntime(module.TranslatorRuntime):  # pylint: disable=too-few-public-methods
+        def caption_worker(self, job_id, video_path):
+            video_path.unlink(missing_ok=True)
+            self.caption_jobs[job_id].update(status="error", message="Fixture stopped")
+            self.caption_manager.complete(job_id)
+
+    runtime = AdmissionRuntime(module.RuntimeConfig.from_environment({
+        "TRANSLATOR_MAX_UPLOAD_BYTES": "1048579",
+        "TRANSLATOR_CAPTION_CONCURRENCY": "1",
+        "TRANSLATOR_CAPTION_QUEUE_CAPACITY": "1",
+    }))
+    runtime.captions_dir = tmp_path / "captions"
+    application.state.runtime = runtime
+    entered = asyncio.Queue()
+    hold = asyncio.Event()
+    consumed = {"first": 0, "second": 0, "excess": 0}
+    canceled = []
+    cancel_upload = runtime.caption_manager.cancel_upload
+
+    def observe_cancel(job_id):
+        canceled.append(job_id)
+        cancel_upload(job_id)
+
+    monkeypatch.setattr(runtime.caption_manager, "cancel_upload", observe_cancel)
+
+    async def held_multipart(label):
+        header = (b'--boundary\r\nContent-Disposition: form-data; name="file"; '
+                  b'filename="video.mp4"\r\nContent-Type: video/mp4\r\n\r\n')
+        consumed[label] += len(header)
+        await entered.put(label)
+        yield header
+        await hold.wait()
+        ending = b"video\r\n--boundary--\r\n"
+        consumed[label] += len(ending)
+        yield ending
+
+    async def excess_multipart():
+        body = (b'--boundary\r\nContent-Disposition: form-data; name="file"; '
+                b'filename="excess.mp4"\r\nContent-Type: video/mp4\r\n\r\n'
+                b"excess\r\n--boundary--\r\n")
+        consumed["excess"] += len(body)
+        yield body
+
+    async def exercise():
+        headers = {"content-type": "multipart/form-data; boundary=boundary"}
+        tasks = []
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=application), base_url="http://test",
+            ) as client:
+                tasks = [
+                    asyncio.create_task(client.post(
+                        "/captions/upload", headers=headers, content=held_multipart(label),
+                    ))
+                    for label in ("first", "second")
+                ]
+                assert {await asyncio.wait_for(entered.get(), 2) for _ in tasks} == {
+                    "first", "second",
+                }
+                response = await asyncio.wait_for(client.post(
+                    "/captions/upload", headers=headers, content=excess_multipart(),
+                ), 2)
+                assert response.status_code == 429
+                assert response.json() == {
+                    "error": "Caption capacity is full; retry after current jobs finish",
+                }
+                assert response.headers["retry-after"] == "5"
+                assert consumed["excess"] == 0
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            hold.set()
+
+        assert len(canceled) == 2
+        assert len(set(canceled)) == 2
+        assert runtime.caption_manager.reserve("0123456789ab")
+        assert runtime.caption_manager.reserve("abcdefabcdef")
+        assert not runtime.caption_manager.reserve("111111111111")
+        runtime.caption_manager.cancel_upload("0123456789ab")
+        runtime.caption_manager.cancel_upload("abcdefabcdef")
+        await runtime.stop()
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize("failure", ["write", "thread_start", "mkdir"])
 def test_upload_failure_removes_files_and_job_and_closes_upload(
     upload_runtime, monkeypatch, failure,

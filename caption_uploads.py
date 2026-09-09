@@ -1,4 +1,4 @@
-"""Bound caption request bodies before multipart parsing can spool their contents."""
+"""Admit and bound caption requests before multipart parsing can spool them."""
 
 from contextlib import suppress
 
@@ -21,10 +21,23 @@ class UploadRequestTooLargeError(HTTPException):
         return exception.response()
 
 
+class CaptionUploadCapacityError(HTTPException):
+    """Retain the existing response contract when no upload slot is available."""
+
+    def __init__(self):
+        super().__init__(429, "Caption capacity is full; retry after current jobs finish")
+
+    def response(self):
+        return JSONResponse(
+            {"error": self.detail}, status_code=self.status_code, headers={"Retry-After": "5"},
+        )
+
+
 class CaptionUploadLimitMiddleware:  # pylint: disable=too-few-public-methods
-    """Enforce the file allowance plus 64 KiB of multipart framing per request."""
+    """Reserve capacity and bound each body before multipart parsing."""
 
     MULTIPART_OVERHEAD_BYTES = 65536
+    ADMISSION_SCOPE_KEY = "caption_upload_admission"
 
     def __init__(self, app):
         self.app = app
@@ -54,6 +67,13 @@ class CaptionUploadLimitMiddleware:  # pylint: disable=too-few-public-methods
                         await error.response()(scope, receive, send)
                         return
 
+        runtime = scope["app"].state.runtime
+        admission = await runtime.admit_caption_upload()
+        if admission is None:
+            await CaptionUploadCapacityError().response()(scope, receive, send)
+            return
+        scope[self.ADMISSION_SCOPE_KEY] = admission
+
         received = 0
 
         async def limited_receive():
@@ -66,4 +86,7 @@ class CaptionUploadLimitMiddleware:  # pylint: disable=too-few-public-methods
                     raise error
             return message
 
-        await self.app(scope, limited_receive, send)
+        try:
+            await self.app(scope, limited_receive, send)
+        finally:
+            admission.release()
