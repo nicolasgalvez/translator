@@ -217,11 +217,27 @@ those old generated directories on later sweeps.
 
 ## Docker
 
+The supported container profile is a Linux x86_64 host with an NVIDIA GPU,
+CUDA 12.4-capable drivers, and the NVIDIA Container Toolkit, plus an ALSA
+capture device exposed at `/dev/snd`. Docker Desktop on macOS cannot pass
+through that Linux audio/GPU device combination; on a Mac, use the native
+`./run.sh` path described in Quick Start instead.
+
+Set `TRANSLATOR_DEVICE` to the exact ALSA/PortAudio input name (or an
+unambiguous substring) before starting Compose. The application validates it
+before loading the Whisper model and prints the available input devices if it
+does not match.
+
 ```bash
+export TRANSLATOR_DEVICE="USB Audio Device"
+docker compose config --quiet
 docker compose up --build
 ```
 
-Requires NVIDIA GPU runtime for CUDA acceleration. Falls back to CPU if unavailable.
+Compose requires the NVIDIA runtime and maps `/dev/snd` into the container. It
+publishes the configured port on all host interfaces; restrict access with the
+host firewall when the service should remain local. This Docker profile does
+not provide a CPU fallback.
 
 Docker builds exclude local `.env` files, saved transcripts, caption uploads, and
 generated subtitles from the build context. Supply configuration at runtime and
