@@ -122,14 +122,14 @@ printf 'fake audio\n' > "$audio_fixture"
 failed=0
 
 for fixture in "${excluded_fixtures[@]}"; do
-  if ! git check-ignore --quiet -- "$fixture"; then
+  if ! git check-ignore --no-index --quiet -- "$fixture"; then
     echo "Git would include runtime fixture: $fixture" >&2
     failed=1
   fi
 done
 
 for fixture in "${included_fixtures[@]}"; do
-  if git check-ignore --quiet -- "$fixture"; then
+  if git check-ignore --no-index --quiet -- "$fixture"; then
     echo "Git would exclude public environment template: $fixture" >&2
     failed=1
   fi
