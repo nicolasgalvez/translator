@@ -24,6 +24,7 @@ from starlette.requests import Request
 from language import LanguageOption
 from plugin_loader import load_plugins
 from transcript_events import process_transcript_text, queue_transcript_render_event
+from websocket_security import WebSocketOriginPolicy
 
 if TYPE_CHECKING:
     import numpy as np
@@ -40,7 +41,7 @@ SILENCE_CHUNKS_TO_SPLIT = 2
 
 
 @dataclass(frozen=True)
-class RuntimeConfig:
+class RuntimeConfig:  # pylint: disable=too-many-instance-attributes
     """Validated environment values; constructing these acquires no resources."""
 
     host: str
@@ -50,6 +51,7 @@ class RuntimeConfig:
     backend_name: str
     language: LanguageOption
     max_upload_bytes: int
+    allowed_origins: frozenset[str] = frozenset()
 
     @classmethod
     def from_environment(cls, environ):
@@ -76,8 +78,18 @@ class RuntimeConfig:
             raise ValueError("TRANSLATOR_MAX_UPLOAD_BYTES must be a positive integer")
         if values["BACKEND"] not in ("faster-whisper", "mlx-whisper"):
             raise ValueError("TRANSLATOR_BACKEND must be 'faster-whisper' or 'mlx-whisper'")
+        origin_setting = environ.get("TRANSLATOR_ALLOWED_ORIGINS", "")
+        try:
+            allowed_origins = WebSocketOriginPolicy(frozenset(
+                origin.strip() for origin in origin_setting.split(",")
+            ) if origin_setting.strip() else frozenset()).additional_origins
+        except ValueError as exc:
+            raise ValueError(
+                "TRANSLATOR_ALLOWED_ORIGINS must contain exact HTTP(S) origins"
+            ) from exc
         return cls(values["HOST"], port, values["MODEL"], values["DEVICE"],
-                   values["BACKEND"], LanguageOption.from_env(environ), max_upload_bytes)
+                   values["BACKEND"], LanguageOption.from_env(environ), max_upload_bytes,
+                   allowed_origins)
 
 
 class UploadTooLargeError(Exception):
@@ -92,6 +104,7 @@ class TranslatorRuntime:
 
     def __init__(self, config: RuntimeConfig):
         self.config = config
+        self.origin_policy = WebSocketOriginPolicy(config.allowed_origins)
         self.transcripts_dir = Path("transcripts")
         self.captions_dir = Path("captions")
         self.frontend_dist = Path("frontend/dist")
@@ -451,6 +464,9 @@ class TranslatorRuntime:
         return FileResponse(path, filename=filename, media_type="audio/wav")
 
     async def websocket_endpoint(self, ws: WebSocket):
+        if not self.origin_policy.allows(ws.scope):
+            await ws.close(code=1008)
+            return
         await ws.accept()
         self.clients.append(ws)
         try:

@@ -1,5 +1,8 @@
 """Runtime boundaries: import, configuration, application lifecycle, and cleanup."""
 
+# Endpoint regressions stay beside the resource and lifecycle boundary tests.
+# pylint: disable=too-many-lines
+
 import asyncio
 import gc
 import importlib
@@ -13,6 +16,7 @@ import threading
 from types import SimpleNamespace
 import wave
 import weakref
+from contextlib import suppress
 
 import pytest
 import httpx
@@ -622,6 +626,246 @@ def test_shutdown_waits_for_a_transcript_file_commit(tmp_path, monkeypatch):
         assert runtime.text_queue.empty()
 
     asyncio.run(exercise())
+
+
+def websocket_scope(headers, root_path="", scheme="ws"):
+    """A request with server-provided connection metadata and raw client headers."""
+    return {
+        "type": "websocket", "asgi": {"version": "3.0"}, "scheme": scheme,
+        "path": root_path + "/ws", "raw_path": (root_path + "/ws").encode(),
+        "root_path": root_path, "query_string": b"", "headers": headers,
+        "client": ("127.0.0.1", 12345), "server": ("127.0.0.1", 8765),
+        "subprotocols": [],
+    }
+
+
+@pytest.mark.parametrize("scheme,origin,host,allowed", [
+    ("ws", "http://localhost:8765", "localhost:8765", True),
+    ("ws", "HTTP://LOCALHOST:8765", "LocalHost:8765", True),
+    ("ws", "http://localhost", "localhost:80", True),
+    ("ws", "http://localhost:80", "localhost", True),
+    ("wss", "https://transcripts.example", "transcripts.example:443", True),
+    ("wss", "https://transcripts.example:443", "transcripts.example", True),
+    ("wss", "https://transcripts.example:0443", "transcripts.example", True),
+    ("ws", "http://127.0.0.1:5173", "127.0.0.1:5173", True),
+    ("ws", "http://[::1]:8765", "[0:0:0:0:0:0:0:1]:8765", True),
+    ("wss", "https://[2001:DB8::1]", "[2001:db8:0:0:0:0:0:1]:443", True),
+    ("ws", "http://localhost:8765", "localhost:8766", False),
+    ("ws", "http://127.0.0.1:8765", "localhost:8765", False),
+    ("wss", "https://transcripts.example", "transcripts.example:80", False),
+    ("ws", "http://transcripts.example", "transcripts.example:443", False),
+    ("ws", "http://[::1]:8765", "[::2]:8765", False),
+    ("ws", "http://localhost:8765", "evil.example:8765", False),
+    ("ws", "http://localhost:8765", "localhost.:8765", False),
+    ("wss", "http://transcripts.example", "transcripts.example", False),
+    ("wss", "http://transcripts.example", "transcripts.example:443", False),
+    ("wss", "http://transcripts.example:443", "transcripts.example:443", False),
+    ("ws", "https://transcripts.example", "transcripts.example", False),
+    ("ws", "https://transcripts.example", "transcripts.example:80", False),
+    ("ws", "https://transcripts.example:80", "transcripts.example:80", False),
+])
+def test_websocket_origin_policy_matches_normalized_request_host(scheme, origin, host, allowed):
+    policy = importlib.import_module("websocket_security").WebSocketOriginPolicy()
+    scope = websocket_scope([(b"origin", origin.encode()), (b"host", host.encode())], scheme=scheme)
+    assert policy.allows(scope) is allowed
+
+
+INVALID_ORIGINS = [
+    "", "null", "*", "localhost:8765", "//localhost:8765", "ws://localhost:8765",
+    "file://localhost:8765", "http://", "http://localhost:8765/",
+    "http://localhost:8765/path", "http://localhost:8765?query",
+    "http://localhost:8765?", "http://localhost:8765#fragment", "http://localhost:8765#",
+    "http://user@localhost:8765", "http://user:pass@localhost:8765",
+    "http://localhost:8765,http://evil.example", "http://localhost:8765 http://evil.example",
+    " http://localhost:8765", "http://localhost:8765 ", "http://local\thost:8765",
+    "http://localhost:8765\r\n", "http://localhost:8765\\evil", "http://localhost:",
+    "http://localhost:-1", "http://localhost:65536", "http://localhost:abc",
+    "http://[::1", "http://::1:8765", "http://[::1]garbage:8765",
+    "http://[fe80::1%25en0]:8765", "http://local%68ost:8765", "http://local\x00host:8765",
+]
+
+
+@pytest.mark.parametrize("origin", INVALID_ORIGINS)
+def test_websocket_origin_policy_rejects_malformed_browser_origins(origin):
+    policy = importlib.import_module("websocket_security").WebSocketOriginPolicy()
+    assert not policy.allows(websocket_scope([
+        (b"origin", origin.encode()), (b"host", b"localhost:8765"),
+    ]))
+
+
+@pytest.mark.parametrize("headers", [
+    [(b"host", b"localhost:8765")], [],
+])
+def test_websocket_origin_policy_allows_non_browser_clients(headers):
+    policy = importlib.import_module("websocket_security").WebSocketOriginPolicy()
+    assert policy.allows(websocket_scope(headers))
+
+
+@pytest.mark.parametrize("headers", [
+    [(b"origin", b"http://localhost:8765"), (b"origin", b"http://localhost:8765"),
+     (b"host", b"localhost:8765")],
+    [(b"origin", b"https://trusted.example"), (b"origin", b"https://evil.example"),
+     (b"host", b"localhost:8765")],
+    [(b"origin", b"http://localhost:8765"), (b"host", b"localhost:8765"),
+     (b"host", b"evil.example")],
+    [(b"origin", b"https://trusted.example"), (b"host", b"localhost:8765"),
+     (b"host", b"localhost:8765")],
+    [(b"origin", b"http://localhost:8765")],
+    [(b"origin", b"http://localhost:8765"), (b"host", b"localhost:8765/path")],
+    [(b"origin", b"http://localhost:8765"), (b"host", b"localhost:8765,evil.example")],
+    [(b"origin", b"http://localhost:8765"), (b"host", b"user@localhost:8765")],
+    [(b"origin", b"http://[::1]:8765"), (b"host", b"[::1]garbage:8765")],
+    [(b"origin", b"http://localhost:8765"), (b"host", b"localhost:8765 ")],
+    [(b"origin", b"http://local\xffhost:8765"), (b"host", b"local\xffhost:8765")],
+])
+def test_websocket_origin_policy_rejects_ambiguous_headers(headers):
+    policy = importlib.import_module("websocket_security").WebSocketOriginPolicy(
+        frozenset({"https://trusted.example"}),
+    )
+    assert not policy.allows(websocket_scope(headers))
+
+
+@pytest.mark.parametrize("origin,allowed", [
+    ("https://TRUSTED.example", True), ("https://trusted.example:443", True),
+    ("http://trusted.example", False), ("https://trusted.example:444", False),
+    ("https://trusted.example.evil.example", False), ("https://evil.example", False),
+    ("http://[::1]:5173", True),
+])
+def test_websocket_origin_policy_additional_origins_are_exact(origin, allowed):
+    policy = importlib.import_module("websocket_security").WebSocketOriginPolicy(
+        frozenset({"https://trusted.example:443", "http://[0:0:0:0:0:0:0:1]:5173"}),
+    )
+    scope = websocket_scope([(b"origin", origin.encode()), (b"host", b"internal:8765")])
+    assert policy.allows(scope) is allowed
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("", frozenset()), ("  ", frozenset()),
+    (" HTTPS://Trusted.example,https://trusted.example:443 , http://[::1]:5173 ",
+     frozenset({"https://trusted.example:443", "http://[::1]:5173"})),
+])
+def test_allowed_origin_configuration_is_validated_without_resources(tmp_path, monkeypatch,
+                                                                   value, expected):
+    monkeypatch.chdir(tmp_path)
+    module = importlib.import_module("translator_runtime")
+    config = module.RuntimeConfig.from_environment({"TRANSLATOR_ALLOWED_ORIGINS": value})
+    assert config.allowed_origins == expected
+    module.TranslatorRuntime(config)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("value", [
+    "null", "*", "https://trusted.example/", "https://trusted.example?query",
+    "https://user@trusted.example", "https://trusted.example:65536",
+    "https://trusted.example,", ",https://trusted.example",
+    "https://trusted.example,,https://other.example", "https://trusted.example,not-an-origin",
+])
+def test_allowed_origin_configuration_rejects_invalid_entries(value):
+    module = importlib.import_module("translator_runtime")
+    with pytest.raises(ValueError, match="TRANSLATOR_ALLOWED_ORIGINS"):
+        module.RuntimeConfig.from_environment({"TRANSLATOR_ALLOWED_ORIGINS": value})
+
+
+@pytest.mark.parametrize("root_path", ["", "/translator"])
+@pytest.mark.parametrize("headers,extra_origins,allowed", [
+    ([(b"host", b"localhost:8765")], "", True),
+    ([(b"origin", b"http://localhost:8765"), (b"host", b"localhost:8765")], "", True),
+    ([(b"origin", b"http://127.0.0.1:5173"), (b"host", b"127.0.0.1:5173")], "", True),
+    ([(b"origin", b"https://public.example"), (b"host", b"public.example")], "", False),
+    ([(b"origin", b"https://public.example"), (b"host", b"public.example")],
+     "https://PUBLIC.example:443", True),
+    ([(b"origin", b"https://public.example"), (b"host", b"internal:8765")],
+     "https://PUBLIC.example:443", True),
+    ([(b"origin", b"https://evil.example"), (b"host", b"localhost:8765")], "", False),
+    ([(b"origin", b"null"), (b"host", b"localhost:8765")], "", False),
+    ([(b"origin", b"http://localhost:8765/"), (b"host", b"localhost:8765")], "", False),
+    ([(b"origin", b"http://localhost:8765"), (b"origin", b"http://localhost:8765"),
+      (b"host", b"localhost:8765")], "", False),
+    ([(b"origin", b"http://localhost:8765"), (b"host", b"localhost:8765"),
+      (b"host", b"evil.example")], "", False),
+    ([(b"origin", b"https://public.example"), (b"host", b"internal:8765"),
+      (b"x-forwarded-host", b"public.example"), (b"x-forwarded-proto", b"https"),
+      (b"forwarded", b"host=public.example;proto=https")], "", False),
+])
+def test_websocket_endpoint_enforces_origin_before_transcript_access(headers, extra_origins,
+                                                                   allowed, root_path):
+    assert_websocket_access(websocket_scope(headers, root_path), extra_origins, allowed)
+
+
+@pytest.mark.parametrize("root_path", ["", "/translator"])
+@pytest.mark.parametrize("scheme,origin,host,allowed", [
+    ("wss", "http://transcripts.example", "transcripts.example", False),
+    ("wss", "http://transcripts.example", "transcripts.example:443", False),
+    ("wss", "http://transcripts.example:443", "transcripts.example", False),
+    ("wss", "http://transcripts.example:443", "transcripts.example:443", False),
+    ("wss", "http://transcripts.example:8765", "transcripts.example:8765", False),
+    ("ws", "https://transcripts.example", "transcripts.example", False),
+    ("ws", "https://transcripts.example", "transcripts.example:80", False),
+    ("ws", "https://transcripts.example:80", "transcripts.example", False),
+    ("ws", "https://transcripts.example:80", "transcripts.example:80", False),
+    ("ws", "https://transcripts.example:8765", "transcripts.example:8765", False),
+    ("wss", "https://transcripts.example", "transcripts.example", True),
+    ("wss", "https://transcripts.example", "transcripts.example:443", True),
+    ("ws", "http://transcripts.example", "transcripts.example", True),
+    ("ws", "http://transcripts.example", "transcripts.example:80", True),
+])
+def test_websocket_endpoint_uses_trusted_scheme(scheme, origin, host, allowed, root_path):
+    headers = [(b"origin", origin.encode()), (b"host", host.encode()),
+               (b"x-forwarded-proto", b"https" if scheme == "ws" else b"http")]
+    assert_websocket_access(websocket_scope(headers, root_path, scheme), "", allowed)
+
+
+def assert_websocket_access(scope, extra_origins, allowed):
+    """Exercise the real route and broadcast loop, including registration and cleanup."""
+    module = importlib.import_module("translator_runtime")
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({
+        "TRANSLATOR_ALLOWED_ORIGINS": extra_origins,
+    }))
+    application = importlib.import_module("app").create_app()
+    application.state.runtime = runtime
+    messages = []
+    client_counts = []
+
+    async def exercise():
+        connected = False
+        delivered = asyncio.Event()
+
+        async def receive():
+            nonlocal connected
+            if not connected:
+                connected = True
+                return {"type": "websocket.connect"}
+            client_counts.append(len(runtime.clients))
+            runtime.text_queue.put({"id": "event-1", "text": "private transcript"})
+            broadcaster = asyncio.create_task(runtime.broadcast_loop())
+            try:
+                await asyncio.wait_for(delivered.wait(), 1)
+            finally:
+                broadcaster.cancel()
+                with suppress(asyncio.CancelledError):
+                    await broadcaster
+            return {"type": "websocket.disconnect", "code": 1000}
+
+        async def send(message):
+            messages.append(message)
+            client_counts.append(len(runtime.clients))
+            if message["type"] == "websocket.send":
+                delivered.set()
+
+        await asyncio.wait_for(application(scope, receive, send), 2)
+
+    asyncio.run(exercise())
+    assert runtime.clients == []
+    if allowed:
+        assert [message["type"] for message in messages] == ["websocket.accept", "websocket.send"]
+        assert json.loads(messages[1]["text"]) == {
+            "type": "transcript", "event": {"id": "event-1", "text": "private transcript"},
+        }
+        assert 1 in client_counts
+    else:
+        assert [message["type"] for message in messages] == ["websocket.close"]
+        assert messages[0]["code"] == 1008
+        assert all(count == 0 for count in client_counts)
 
 
 def test_websocket_disconnect_after_shutdown_is_clean():

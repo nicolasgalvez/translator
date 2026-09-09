@@ -107,6 +107,32 @@ Frontend plugins register transcript filters and main-pane renderers through `fr
 
 Captures system audio in real time, transcribes Spanish with Whisper, saves transcript JSONL entries, and broadcasts transcript events to the React UI.
 
+The live-transcript WebSocket at `/ws` accepts browser connections whose Origin
+matches the request Host, normalizing hostname casing, IPv6 addresses, and default
+HTTP(S) ports. The trusted ASGI connection scheme determines the request origin
+(`ws` maps to `http`; `wss` maps to `https`), including default ports. The frontend
+development proxy preserves Host and the scheme and works without additional
+configuration.
+
+If a trusted proxy rewrites Host or terminates TLS while leaving a different
+internal ASGI scheme, configure the browser's public origin explicitly:
+
+```bash
+TRANSLATOR_ALLOWED_ORIGINS=https://transcripts.example,http://127.0.0.1:5173 ./run.sh
+```
+
+This optional comma-separated list adds exact HTTP(S) origins. Entries cannot
+contain paths (including a trailing `/`), queries, fragments, credentials, or
+wildcards. Invalid entries fail configuration before audio or model startup.
+An unset or blank value adds no origins. Forwarded headers do not grant trust.
+Malformed, duplicate, opaque (`null`), and untrusted browser origins are rejected
+before the socket is accepted or registered for transcripts (ASGI close code 1008;
+the WebSocket server may report a denied handshake as HTTP 403).
+
+Clients without an Origin header are allowed for non-browser integrations.
+Origin protection is not authentication: non-browser clients can omit or forge
+Origin, so restrict network access to trusted clients.
+
 ### Transcript History (`/history`)
 
 Browse saved transcript sessions. Each session saves a `.jsonl` transcript and a `.wav` audio recording.
