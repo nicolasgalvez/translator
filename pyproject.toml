@@ -29,7 +29,7 @@ mlx = ["mlx-whisper; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 # sys_platform cannot tell CI-Linux from Docker-Linux — both are "linux" — so
 # the choice has to be an extra rather than a marker.
 cpu = ["torch; sys_platform == 'linux'"]
-cuda = ["torch; sys_platform == 'linux'"]
+cuda = ["torch>=2.14.0; sys_platform == 'linux'"]
 
 [dependency-groups]
 dev = ["pytest", "pylint", "pre-commit"]
@@ -59,7 +59,7 @@ explicit = true
 name = "pytorch-cuda"
 # CUDA version is pinned by URL, not by a version constraint — moving CUDA means
 # editing this line.
-url = "https://download.pytorch.org/whl/cu124"
+url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
 [tool.uv.sources]

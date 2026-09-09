@@ -26,8 +26,12 @@ version="$(docker run --rm --platform linux/amd64 \
 stack="$(docker run --rm --platform linux/amd64 \
     --entrypoint /opt/translator/.venv/bin/python "$runtime_image" -c '
 from importlib.metadata import version
+from packaging.version import Version
 import ctranslate2, faster_whisper, torch
-assert torch.version.cuda == "12.4", torch.version.cuda
+torch_version = Version(version("torch"))
+assert torch_version.release >= (2, 14, 0), torch_version
+assert torch_version.local == "cu126", torch_version
+assert torch.version.cuda == "12.6", torch.version.cuda
 print(
     "torch={} torch-cuda={} ctranslate2={} faster-whisper={}".format(
         version("torch"), torch.version.cuda, ctranslate2.__version__,

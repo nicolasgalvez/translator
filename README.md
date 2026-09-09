@@ -243,10 +243,22 @@ those old generated directories on later sweeps.
 ## Docker
 
 The supported container profile is a Linux x86_64 host with an NVIDIA GPU,
-CUDA 12.4-capable drivers, and the NVIDIA Container Toolkit, plus an ALSA
+CUDA 12.6-capable drivers, and the NVIDIA Container Toolkit, plus an ALSA
 capture device exposed at `/dev/snd`. Docker Desktop on macOS cannot pass
 through that Linux audio/GPU device combination; on a Mac, use the native
 `./run.sh` path described in Quick Start instead.
+
+The runtime uses the official PyTorch `cu126` wheel index and the
+`nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04` base. Its linux/amd64 image
+metadata declares `NVIDIA_REQUIRE_CUDA=cuda>=12.6`. NVIDIA pairs CUDA 12.6.3
+with Linux driver 560.35.05; use that version or newer for the straightforward
+supported configuration. CUDA 12.x minor-version compatibility starts at
+525.60.13, subject to NVIDIA's documented feature restrictions. Older 470.x,
+535.x, and 550.x branches appear only in brand-constrained forward-compatibility
+clauses; NVIDIA limits that path to data-center GPUs, select RTX SKUs, and Jetson
+systems. Do not treat those legacy branches as general GeForce support. This
+coordinated upgrade removes the advisories affecting the former Torch
+2.6.0+cu124 runtime.
 
 Set `TRANSLATOR_DEVICE` to the exact ALSA/PortAudio input name (or an
 unambiguous substring) before starting Compose. The application validates it
