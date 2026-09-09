@@ -33,6 +33,7 @@ from transcript_events import process_transcript_text, queue_transcript_render_e
 from transcript_history import TranscriptHistoryReader
 from websocket_security import WebSocketOriginPolicy
 from websocket_delivery import WebSocketDeliveryRegistry
+from wav_recorder import RecordingError, RotatingWavRecorder
 
 if TYPE_CHECKING:
     import numpy as np
@@ -78,7 +79,9 @@ class TranslatorRuntime:
         self.backend = None
         self.transcript_file = None
         self.audio_file = None
-        self.wav_writer = None
+        self.audio_recorder = None
+        self._recording_status_event = None
+        self._recording_status_broadcast = False
         self.audio_stream = None
         self.worker_threads: list[threading.Thread] = []
         self.broadcast_task = None
@@ -108,10 +111,14 @@ class TranslatorRuntime:
             self.transcript_file = self.transcripts_dir / f"{session_stem}.jsonl"
             self.audio_file = self.transcripts_dir / f"{session_stem}.wav"
             print(f"Transcript auto-saving to: {self.transcript_file}", flush=True)
-            self.wav_writer = wave.open(str(self.audio_file), "wb")
-            self.wav_writer.setnchannels(1)
-            self.wav_writer.setsampwidth(2)
-            self.wav_writer.setframerate(SAMPLE_RATE)
+            self.transcript_file.touch(exist_ok=True)
+            self.audio_recorder = RotatingWavRecorder(
+                self.transcripts_dir, session_stem, self.config.recording_storage_bytes,
+            )
+            try:
+                self.audio_recorder.open()
+            except RecordingError as exc:
+                self._publish_recording_error(exc)
             self.audio_stream = sd.InputStream(
                 samplerate=SAMPLE_RATE, channels=1, dtype="float32", device=self.device_index,
             )
@@ -135,11 +142,6 @@ class TranslatorRuntime:
         errors = []
         with self._capture_cleanup_error(errors):
             await asyncio.to_thread(self._wait_for_transcript_commit)
-        if self.broadcast_task is not None:
-            with self._capture_cleanup_error(errors):
-                self.broadcast_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await self.broadcast_task
         stream = self.audio_stream
         if stream is not None:
             with self._capture_cleanup_error(errors):
@@ -152,11 +154,22 @@ class TranslatorRuntime:
         if stream is not None:
             with self._capture_cleanup_error(errors):
                 stream.close()
-        with self._capture_cleanup_error(errors):
+        try:
             with self.wav_lock:
-                writer, self.wav_writer = self.wav_writer, None
-                if writer is not None:
-                    writer.close()
+                recorder, self.audio_recorder = self.audio_recorder, None
+                if recorder is not None:
+                    recorder.close()
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            event = self._publish_recording_error(exc, enqueue=False)
+            if event is not None:
+                self.client_deliveries.broadcast(json.dumps(event))
+                self._recording_status_broadcast = True
+            errors.append(exc)
+        if self.broadcast_task is not None:
+            with self._capture_cleanup_error(errors):
+                self.broadcast_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self.broadcast_task
         with self._capture_cleanup_error(errors):
             await self.client_deliveries.close_all()
         if errors:
@@ -269,12 +282,32 @@ class TranslatorRuntime:
                 with self.wav_lock:
                     if self._stopping.is_set():
                         break
-                    self.wav_writer.writeframes(pcm.tobytes())
+                    recorder = self.audio_recorder
+                    if recorder is not None and recorder.enabled:
+                        try:
+                            recorder.write(pcm.tobytes())
+                        except RecordingError as exc:
+                            self._publish_recording_error(exc)
                 self.audio_chunk_queue.put(audio)
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 if not self._stopping.is_set():
                     print(f"Audio capture error: {exc}", flush=True)
                 break
+
+    def _publish_recording_error(self, error: Exception, enqueue: bool = True) -> dict | None:
+        if self._recording_status_event is not None:
+            return None
+        print(f"Recording disabled: {error}", flush=True)
+        event = {
+            "type": "status",
+            "status": "recording-error",
+            "message": "Recording stopped; live transcription continues.",
+        }
+        self._recording_status_event = event
+        self._recording_status_broadcast = False
+        if enqueue:
+            self.text_queue.put(event)
+        return event
 
     def audio_process_loop(self):
         """Split capture promptly even while the backend is still transcribing."""
@@ -342,11 +375,18 @@ class TranslatorRuntime:
         while True:
             try:
                 entry = self.text_queue.get_nowait()
-                msg = json.dumps({"type": "transcript", "event": entry})
-                self.client_deliveries.broadcast(msg)
             except queue.Empty:
                 await asyncio.sleep(0.1)
             else:
+                try:
+                    message = entry if entry.get("type") == "status" else {
+                        "type": "transcript", "event": entry,
+                    }
+                    self.client_deliveries.broadcast(json.dumps(message))
+                    if entry is self._recording_status_event:
+                        self._recording_status_broadcast = True
+                finally:
+                    self.text_queue.task_done()
                 await asyncio.sleep(0)
 
     async def index(self, request: Request):
@@ -397,6 +437,11 @@ class TranslatorRuntime:
             return
         await ws.accept()
         session = self.client_deliveries.register(ws)
+        if (self._recording_status_event is not None
+                and self._recording_status_broadcast):
+            message = json.dumps(self._recording_status_event)
+            if not session.enqueue(message):
+                self.client_deliveries.detach(session, 1013)
         try:
             while True:
                 await ws.receive_text()

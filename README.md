@@ -148,6 +148,26 @@ those captured samples. Runtime counters `audio_chunk_queue.dropped_count` and
 at the first drop and at cumulative counts 2, 4, 8, and so on. Shutdown discards
 pending audio and prevents late inference from publishing transcript output.
 
+Live recording rotates before the WAV RIFF size limit. The first file is
+`<session>.wav`; later independently playable files are
+`<session>.part002.wav`, `<session>.part003.wav`, and so on. The PCM chunk that
+crosses a boundary is written once to the new part, while live transcription
+continues without a boundary gap.
+
+Managed recordings use an 8 GiB storage budget by default. Set a positive byte
+limit with `TRANSLATOR_RECORDING_STORAGE_BYTES`, for example:
+
+```bash
+TRANSLATOR_RECORDING_STORAGE_BYTES=4294967296 ./run.sh
+```
+
+Before a recording grows, the oldest inactive session recordings are removed as
+complete multipart groups until the write fits. Their `.jsonl` transcripts remain
+available, the active session is never evicted, and unrelated files and symlinks
+are ignored. If the active recording cannot fit or a recording operation fails,
+the UI reports that recording stopped while captured audio continues through live
+transcription.
+
 The live-transcript WebSocket at `/ws` accepts browser connections whose Origin
 matches the request Host, normalizing hostname casing, IPv6 addresses, and default
 HTTP(S) ports. The trusted ASGI connection scheme determines the request origin
@@ -185,7 +205,9 @@ exit.
 
 ### Transcript History (`/history`)
 
-Browse saved transcript sessions. Each session saves a `.jsonl` transcript and a `.wav` audio recording.
+Browse saved transcript sessions. Each session saves a `.jsonl` transcript and
+one or more WAV recording parts. Ordinary sessions retain one audio player;
+multipart sessions show their contiguous recording parts in numeric order.
 
 History shows the 50 newest sessions and the 500 most recent entries in a session
 by default. Truncated session lists, entry counts, and detail views are labeled in

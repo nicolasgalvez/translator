@@ -6,7 +6,7 @@ import { MainPane } from "@/components/MainPane"
 import { TranscriptPane } from "@/components/TranscriptPane"
 import { applyTranscriptFilters } from "@/plugins/registry"
 import "@/plugins/highlightKeyword"
-import type { TranscriptEvent, TranscriptMessage } from "@/types"
+import type { ServerMessage, TranscriptEvent } from "@/types"
 
 type ConnectionState = "connected" | "disconnected"
 const LIVE_TRANSCRIPT_LIMIT = 500
@@ -20,6 +20,7 @@ function App() {
   const [events, setEvents] = useState<TranscriptEvent[]>([])
   const [connectionState, setConnectionState] =
     useState<ConnectionState>("disconnected")
+  const [recordingError, setRecordingError] = useState<string | null>(null)
 
   useEffect(() => {
     let reconnectTimer: number | undefined
@@ -37,8 +38,11 @@ function App() {
         }
       }
       ws.onmessage = (message) => {
-        const payload = JSON.parse(message.data) as TranscriptMessage
-        if (payload.type !== "transcript") return
+        const payload = JSON.parse(message.data) as ServerMessage
+        if (payload.type === "status") {
+          if (payload.status === "recording-error") setRecordingError(payload.message)
+          return
+        }
         const event = applyTranscriptFilters(payload.event)
         setEvents((current) => [...current, event].slice(-LIVE_TRANSCRIPT_LIMIT))
       }
@@ -80,6 +84,15 @@ function App() {
           History
         </a>
       </header>
+
+      {recordingError && (
+        <div
+          className="border-b border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive"
+          role="alert"
+        >
+          {recordingError}
+        </div>
+      )}
 
       <PanelGroup className="min-h-0 flex-1" direction="horizontal">
         <Panel defaultSize={33} minSize={22}>

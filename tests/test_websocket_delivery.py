@@ -371,3 +371,29 @@ def test_runtime_broadcast_preserves_transcript_message_shape():
             await runtime.client_deliveries.close_all()
 
     asyncio.run(exercise())
+
+
+def test_runtime_broadcast_delivers_recording_status_through_the_bounded_registry():
+    module = importlib.import_module("translator_runtime")
+
+    async def exercise():
+        socket = RecordingSocket()
+        runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+        runtime.client_deliveries.register(socket)
+        status = {
+            "type": "status",
+            "status": "recording-error",
+            "message": "Recording stopped; live transcription continues.",
+        }
+        runtime.text_queue.put(status)
+        broadcaster = asyncio.create_task(runtime.broadcast_loop())
+        try:
+            delivered = await asyncio.wait_for(socket.deliveries.get(), 1)
+            assert json.loads(delivered) == status
+        finally:
+            broadcaster.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await broadcaster
+            await runtime.client_deliveries.close_all()
+
+    asyncio.run(exercise())

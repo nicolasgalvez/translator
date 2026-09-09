@@ -95,9 +95,16 @@
         <a class="nav-link" href="/history">History</a>
         <a class="nav-link" href="/">Live</a>
     </header>
-    {% if has_audio %}
+    {% if audio_urls|length == 1 %}
     <div style="padding: 0.5rem 1rem; background: #16213e; border-bottom: 1px solid #0f3460;">
+        <audio controls style="width: 100%; height: 36px;" src="{{ audio_urls[0] }}"></audio>
+    </div>
+    {% elif audio_urls %}
+    <div style="padding: 0.5rem 1rem; background: #16213e; border-bottom: 1px solid #0f3460;">
+        {% for audio_url in audio_urls %}
+        <div class="subtitle">Recording part {{ loop.index }}</div>
         <audio controls style="width: 100%; height: 36px;" src="{{ audio_url }}"></audio>
+        {% endfor %}
     </div>
     {% endif %}
     {% if entries_truncated %}
