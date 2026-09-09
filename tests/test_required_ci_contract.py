@@ -60,7 +60,9 @@ def test_controller_separates_trusted_policy_from_the_candidate_checkout():
     workflow = read_workflow("required.yml")
 
     assert "ref: ${{ github.event.pull_request.base.sha }}" in workflow
-    assert workflow.count("repository: ${{ github.repository }}") == 2
+    assert workflow.count("repository: ${{ github.repository }}") == workflow.count(
+        "uses: actions/checkout@v7"
+    )
     assert "path: policy" in workflow
     assert "path: candidate" in workflow
     assert "persist-credentials: false" in workflow
@@ -222,7 +224,7 @@ def test_required_workflow_calls_every_suite_and_waits_for_each_result():
 
     required_job = workflow.split("  required:", maxsplit=1)[1]
     assert "if: always()" in required_job
-    assert "name: policy-gate" in required_job
+    assert "name: required" in required_job
     for dependency in ("classify", *SUITE_WORKFLOWS):
         assert dependency in required_job.split("runs-on:", maxsplit=1)[0]
 
@@ -238,59 +240,43 @@ def test_required_gate_rejects_failed_applicable_and_run_inapplicable_suites():
         assert result_name in required_job
 
 
-def test_isolated_publisher_reports_the_gate_on_the_validated_merge_sha():
+def test_native_required_job_is_the_base_owned_final_gate():
     workflow = read_workflow("required.yml")
-    publisher = workflow.split("  publish_required:", maxsplit=1)[1]
+    required_job = workflow.split("  required:", maxsplit=1)[1]
 
-    assert "if: always()" in publisher
-    assert "needs:\n      - classify\n      - required" in publisher
-    assert "permissions:\n      checks: write" in publisher
-    assert "actions/checkout" not in publisher
-    assert "candidate/" not in publisher
-    assert "policy/" not in publisher
-    assert "CANDIDATE_SHA: ${{ needs.classify.outputs.candidate_sha }}" in publisher
-    assert "needs.classify.outputs.head_sha" not in publisher
-    assert "github.event.pull_request.head.sha" not in publisher
-    assert "needs.classify.result" in publisher
-    assert "needs.required.result" in publisher
-    assert 'CONCLUSION="failure"' in publisher
-    assert 'CONCLUSION="success"' in publisher
-    assert '"name": "required"' in publisher
-    assert '--arg head_sha "$CANDIDATE_SHA"' in publisher
-    assert '"head_sha": $head_sha' in publisher
-    assert '"conclusion": $conclusion' in publisher
-    assert "/repos/$GITHUB_REPOSITORY/check-runs" in publisher
+    assert "name: required" in required_job
+    assert "if: always()" in required_job
+    assert "repository: ${{ github.repository }}" in required_job
+    assert "ref: ${{ github.event.pull_request.base.sha }}" in required_job
+    assert "path: policy" in required_job
+    assert "persist-credentials: false" in required_job
+    assert "python policy/scripts/ci_result_gate.py" in required_job
+    assert "candidate/" not in required_job
 
 
-def test_publisher_fails_closed_without_a_validated_candidate_sha():
+def test_required_workflow_never_manually_publishes_a_check():
     workflow = read_workflow("required.yml")
-    before_publisher, publisher = workflow.split(
-        "  publish_required:", maxsplit=1
-    )
 
-    assert "checks: write" not in before_publisher
-    assert '""|*[!0-9a-fA-F]*)' in publisher
-    assert '[ "$CLASSIFY_RESULT" != "success" ]' in publisher
-    assert '[ "${#CANDIDATE_SHA}" -ne 40 ]' in publisher
-    assert 'echo "Cannot publish without a validated candidate SHA." >&2' in publisher
-    assert publisher.index('[ "$CLASSIFY_RESULT" != "success" ]') < publisher.index(
-        "/repos/$GITHUB_REPOSITORY/check-runs"
-    )
-    assert publisher.count("checks: write") == 1
+    for forbidden in (
+        "publish_required:",
+        "checks: write",
+        "GITHUB_TOKEN",
+        "github.token",
+        "/check-runs",
+        "curl ",
+        "jq -n",
+    ):
+        assert forbidden not in workflow
 
 
-def test_validated_merge_identity_prevents_stale_or_cross_base_publication():
+def test_validated_merge_identity_prevents_stale_or_cross_base_execution():
     workflow = read_workflow("required.yml")
     classifier = workflow.split("  python_test:", maxsplit=1)[0]
-    publisher = workflow.split("  publish_required:", maxsplit=1)[1]
 
     assert '"$PR_NUMBER" "$BASE_SHA" "$HEAD_SHA"' in classifier
     assert "python policy/scripts/ci_merge_candidate.py validate" in classifier
     assert "ref: ${{ steps.candidate_input.outputs.merge_ref }}" in classifier
     assert "id: validated_candidate" in classifier
-    assert "CANDIDATE_SHA: ${{ needs.classify.outputs.candidate_sha }}" in publisher
-    assert "github.event.pull_request.head.sha" not in publisher
-    assert "github.event.pull_request.merge_commit_sha" not in publisher
 
 
 def test_candidate_sha_is_derived_from_the_checked_out_base_repository_merge_ref():
@@ -322,7 +308,7 @@ def test_jira_pr_automation_is_base_owned_and_never_executes_candidate_code():
     assert "write" not in trigger
 
 
-def test_only_the_isolated_publisher_can_write_checks():
+def test_no_workflow_can_write_checks():
     grants = []
     for workflow_path in WORKFLOW_PATHS:
         workflow = workflow_path.read_text(encoding="utf-8")
@@ -330,7 +316,7 @@ def test_only_the_isolated_publisher_can_write_checks():
             workflow_path.name for _ in range(workflow.count("checks: write"))
         )
 
-    assert grants == ["required.yml"]
+    assert not grants
 
 
 def test_versioned_ruleset_protects_the_default_branch_without_bypass():

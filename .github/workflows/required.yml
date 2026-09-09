@@ -133,7 +133,10 @@ jobs:
       candidate_sha: ${{ needs.classify.outputs.candidate_sha }}
 
   required:
-    name: policy-gate
+    # This native job name is the ruleset's required GitHub Actions context.
+    # Keeping the decision in the base-owned workflow associates it with the
+    # pull request while preventing candidate code from minting the result.
+    name: required
     if: always()
     needs:
       - classify
@@ -164,75 +167,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          repository: ${{ github.repository }}
           ref: ${{ github.event.pull_request.base.sha }}
           path: policy
           persist-credentials: false
       - name: Enforce applicable suite results
         run: python policy/scripts/ci_result_gate.py
-
-  # GitHub evaluates a required check on its test merge commit when one exists.
-  # Publish only on the exact merge SHA whose base/head parents were validated
-  # above; using the PR head SHA would allow stale or cross-base results
-  # and is ambiguous for fork commits in the base repository.
-  publish_required:
-    name: publish-required
-    if: always()
-    needs:
-      - classify
-      - required
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      checks: write
-    env:
-      GITHUB_TOKEN: ${{ github.token }}
-      CANDIDATE_SHA: ${{ needs.classify.outputs.candidate_sha }}
-      CLASSIFY_RESULT: ${{ needs.classify.result }}
-      GATE_RESULT: ${{ needs.required.result }}
-    steps:
-      - name: Publish the required check on the synthetic merge
-        run: |
-          if [ "$CLASSIFY_RESULT" != "success" ]; then
-            echo "Classification did not produce a trusted candidate SHA." >&2
-            exit 1
-          fi
-          case "$CANDIDATE_SHA" in
-            ""|*[!0-9a-fA-F]*)
-              echo "Cannot publish without a validated candidate SHA." >&2
-              exit 1
-              ;;
-          esac
-          if [ "${#CANDIDATE_SHA}" -ne 40 ]; then
-            echo "Cannot publish without a validated candidate SHA." >&2
-            exit 1
-          fi
-
-          CONCLUSION="failure"
-          SUMMARY="Trusted CI policy did not pass."
-          if [ "$CLASSIFY_RESULT" = "success" ] \
-            && [ "$GATE_RESULT" = "success" ]; then
-            CONCLUSION="success"
-            SUMMARY="Trusted CI policy passed."
-          fi
-
-          payload="$(jq -n \
-            --arg head_sha "$CANDIDATE_SHA" \
-            --arg conclusion "$CONCLUSION" \
-            --arg summary "$SUMMARY" \
-            '{
-              "name": "required",
-              "head_sha": $head_sha,
-              "status": "completed",
-              "conclusion": $conclusion,
-              "output": {
-                "title": "Required CI gate",
-                "summary": $summary
-              }
-            }')"
-          curl --fail-with-body --silent --show-error \
-            --request POST \
-            --header "Accept: application/vnd.github+json" \
-            --header "Authorization: Bearer $GITHUB_TOKEN" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            --url "https://api.github.com/repos/$GITHUB_REPOSITORY/check-runs" \
-            --data "$payload"
