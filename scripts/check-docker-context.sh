@@ -40,16 +40,15 @@ file_fixtures=(
   "$root_envrc_local_fixture"
   "$frontend_envrc_fixture"
   "$frontend_envrc_local_fixture"
-  "$public_env_example_fixture"
-  "$frontend_env_example_fixture"
   "$transcript_fixture"
   "$audio_fixture"
 )
-fixtures=("${excluded_fixtures[@]}" "${included_fixtures[@]}")
 export_dir="$(mktemp -d "${TMPDIR:-/tmp}/translator-docker-context.XXXXXX")"
 fixtures_created=0
 caption_root_created=0
 transcripts_root_created=0
+public_env_example_created=0
+frontend_env_example_created=0
 
 cleanup() {
   if ((fixtures_created)); then
@@ -62,6 +61,12 @@ cleanup() {
       rmdir -- transcripts 2>/dev/null || true
     fi
   fi
+  if ((public_env_example_created)); then
+    rm -f -- "$public_env_example_fixture"
+  fi
+  if ((frontend_env_example_created)); then
+    rm -f -- "$frontend_env_example_fixture"
+  fi
   rm -rf -- "$export_dir"
 }
 trap cleanup EXIT
@@ -71,10 +76,19 @@ if [[ -e "$caption_fixture_dir" || -L "$caption_fixture_dir" ]]; then
   exit 1
 fi
 
-for fixture in "${fixtures[@]}"; do
+for fixture in "${excluded_fixtures[@]}"; do
   if [[ -e "$fixture" || -L "$fixture" ]]; then
     echo "Refusing to overwrite existing context-test fixture: $fixture" >&2
     exit 1
+  fi
+done
+
+for fixture in "${included_fixtures[@]}"; do
+  if [[ -e "$fixture" || -L "$fixture" ]]; then
+    if [[ ! -f "$fixture" || -L "$fixture" ]]; then
+      echo "Public environment template must be a regular file: $fixture" >&2
+      exit 1
+    fi
   fi
 done
 
@@ -92,8 +106,14 @@ printf 'export TRANSLATOR_TEST_SECRET=not-a-real-secret\n' > "$root_envrc_fixtur
 printf 'export TRANSLATOR_TEST_SECRET=not-a-real-secret\n' > "$root_envrc_local_fixture"
 printf 'export VITE_TEST_SECRET=not-a-real-secret\n' > "$frontend_envrc_fixture"
 printf 'export VITE_TEST_SECRET=not-a-real-secret\n' > "$frontend_envrc_local_fixture"
-printf 'TRANSLATOR_PUBLIC_EXAMPLE=example\n' > "$public_env_example_fixture"
-printf 'VITE_PUBLIC_EXAMPLE=example\n' > "$frontend_env_example_fixture"
+if [[ ! -e "$public_env_example_fixture" ]]; then
+  printf 'TRANSLATOR_PUBLIC_EXAMPLE=example\n' > "$public_env_example_fixture"
+  public_env_example_created=1
+fi
+if [[ ! -e "$frontend_env_example_fixture" ]]; then
+  printf 'VITE_PUBLIC_EXAMPLE=example\n' > "$frontend_env_example_fixture"
+  frontend_env_example_created=1
+fi
 printf 'fake upload\n' > "$caption_upload_fixture"
 printf '1\n00:00:00,000 --> 00:00:01,000\nfake subtitle\n' > "$caption_subtitle_fixture"
 printf '{"text":"fake transcript"}\n' > "$transcript_fixture"
