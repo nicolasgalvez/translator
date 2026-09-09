@@ -2492,8 +2492,11 @@ def test_caption_worker_stops_after_inflight_backend_returns(tmp_path):
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("device_setting", [None, "default", "MacBook Pro Microphone"])
 @pytest.mark.parametrize("broadcast_failure", [False, True])
-def test_runtime_shutdown_closes_owned_resources(tmp_path, monkeypatch, broadcast_failure):
+def test_runtime_shutdown_closes_owned_resources(
+    tmp_path, monkeypatch, capsys, broadcast_failure, device_setting,
+):
     """Exercise real queues, WAV persistence, worker loops, and task cancellation."""
     monkeypatch.chdir(tmp_path)
     module = importlib.import_module("translator_runtime")
@@ -2501,7 +2504,10 @@ def test_runtime_shutdown_closes_owned_resources(tmp_path, monkeypatch, broadcas
     reading = threading.Event()
 
     class InputStream:
-        def __init__(self, **_kwargs):
+        def __init__(self, **kwargs):
+            assert kwargs == {
+                "samplerate": 48000, "channels": 1, "dtype": "float32", "device": 1,
+            }
             self.aborted = threading.Event()
 
         def start(self):
@@ -2522,7 +2528,11 @@ def test_runtime_shutdown_closes_owned_resources(tmp_path, monkeypatch, broadcas
         name = "test backend"
 
     monkeypatch.setitem(sys.modules, "sounddevice", SimpleNamespace(
-        query_devices=lambda: [{"name": "BlackHole 2ch", "max_input_channels": 2}],
+        query_devices=lambda: [
+            {"name": "Speakers", "max_input_channels": 0},
+            {"name": "MacBook Pro Microphone", "max_input_channels": 1},
+        ],
+        default=SimpleNamespace(device=(1, 0)),
         InputStream=InputStream,
     ))
     monkeypatch.setitem(sys.modules, "transcription", SimpleNamespace(
@@ -2531,9 +2541,11 @@ def test_runtime_shutdown_closes_owned_resources(tmp_path, monkeypatch, broadcas
     monkeypatch.setattr(module, "load_plugins", lambda: [])
 
     async def exercise():
-        runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+        environment = {} if device_setting is None else {"TRANSLATOR_DEVICE": device_setting}
+        runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment(environment))
         other = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
         await runtime.start()
+        assert "MacBook Pro Microphone (index 1)" in capsys.readouterr().out
         assert await asyncio.to_thread(reading.wait, 2)
         assert runtime.text_queue is not other.text_queue
         assert runtime.audio_chunk_queue is not other.audio_chunk_queue

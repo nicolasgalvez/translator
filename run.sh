@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HOST=127.0.0.1
 PORT=8765
 MODEL=small
-DEVICE="BlackHole 2ch"
+DEVICE=default
 BACKEND=faster-whisper
 LANGUAGE=es
 FRONTEND_DEV=0
@@ -20,7 +20,7 @@ usage() {
     echo "  -H, --host HOST      Bind address (default: 127.0.0.1)"
     echo "  -p, --port PORT      Server port (default: 8765)"
     echo "  -m, --model MODEL    Whisper model: tiny, base, small, medium, large-v3 (default: small)"
-    echo "  -d, --device DEVICE  Audio input device name (default: BlackHole 2ch)"
+    echo "  -d, --device DEVICE  Audio input name or 'default' for the system microphone (default: default)"
     echo "  -b, --backend NAME   Transcription backend: faster-whisper, mlx-whisper (default: faster-whisper)"
     echo "  -l, --language CODE  Spoken language, e.g. en, es, ja, or 'auto' to detect (default: es)"
     echo "      --frontend-dev   Start the Vite dev server on http://127.0.0.1:5173"
