@@ -628,10 +628,10 @@ def test_shutdown_waits_for_a_transcript_file_commit(tmp_path, monkeypatch):
     asyncio.run(exercise())
 
 
-def websocket_scope(headers, root_path=""):
-    """An external HTTPS request forwarded to an internal plain WebSocket server."""
+def websocket_scope(headers, root_path="", scheme="ws"):
+    """A request with server-provided connection metadata and raw client headers."""
     return {
-        "type": "websocket", "asgi": {"version": "3.0"}, "scheme": "ws",
+        "type": "websocket", "asgi": {"version": "3.0"}, "scheme": scheme,
         "path": root_path + "/ws", "raw_path": (root_path + "/ws").encode(),
         "root_path": root_path, "query_string": b"", "headers": headers,
         "client": ("127.0.0.1", 12345), "server": ("127.0.0.1", 8765),
@@ -639,28 +639,34 @@ def websocket_scope(headers, root_path=""):
     }
 
 
-@pytest.mark.parametrize("origin,host,allowed", [
-    ("http://localhost:8765", "localhost:8765", True),
-    ("HTTP://LOCALHOST:8765", "LocalHost:8765", True),
-    ("http://localhost", "localhost:80", True),
-    ("http://localhost:80", "localhost", True),
-    ("https://transcripts.example", "transcripts.example:443", True),
-    ("https://transcripts.example:443", "transcripts.example", True),
-    ("https://transcripts.example:0443", "transcripts.example", True),
-    ("http://127.0.0.1:5173", "127.0.0.1:5173", True),
-    ("http://[::1]:8765", "[0:0:0:0:0:0:0:1]:8765", True),
-    ("https://[2001:DB8::1]", "[2001:db8:0:0:0:0:0:1]:443", True),
-    ("http://localhost:8765", "localhost:8766", False),
-    ("http://127.0.0.1:8765", "localhost:8765", False),
-    ("https://transcripts.example", "transcripts.example:80", False),
-    ("http://transcripts.example", "transcripts.example:443", False),
-    ("http://[::1]:8765", "[::2]:8765", False),
-    ("http://localhost:8765", "evil.example:8765", False),
-    ("http://localhost:8765", "localhost.:8765", False),
+@pytest.mark.parametrize("scheme,origin,host,allowed", [
+    ("ws", "http://localhost:8765", "localhost:8765", True),
+    ("ws", "HTTP://LOCALHOST:8765", "LocalHost:8765", True),
+    ("ws", "http://localhost", "localhost:80", True),
+    ("ws", "http://localhost:80", "localhost", True),
+    ("wss", "https://transcripts.example", "transcripts.example:443", True),
+    ("wss", "https://transcripts.example:443", "transcripts.example", True),
+    ("wss", "https://transcripts.example:0443", "transcripts.example", True),
+    ("ws", "http://127.0.0.1:5173", "127.0.0.1:5173", True),
+    ("ws", "http://[::1]:8765", "[0:0:0:0:0:0:0:1]:8765", True),
+    ("wss", "https://[2001:DB8::1]", "[2001:db8:0:0:0:0:0:1]:443", True),
+    ("ws", "http://localhost:8765", "localhost:8766", False),
+    ("ws", "http://127.0.0.1:8765", "localhost:8765", False),
+    ("wss", "https://transcripts.example", "transcripts.example:80", False),
+    ("ws", "http://transcripts.example", "transcripts.example:443", False),
+    ("ws", "http://[::1]:8765", "[::2]:8765", False),
+    ("ws", "http://localhost:8765", "evil.example:8765", False),
+    ("ws", "http://localhost:8765", "localhost.:8765", False),
+    ("wss", "http://transcripts.example", "transcripts.example", False),
+    ("wss", "http://transcripts.example", "transcripts.example:443", False),
+    ("wss", "http://transcripts.example:443", "transcripts.example:443", False),
+    ("ws", "https://transcripts.example", "transcripts.example", False),
+    ("ws", "https://transcripts.example", "transcripts.example:80", False),
+    ("ws", "https://transcripts.example:80", "transcripts.example:80", False),
 ])
-def test_websocket_origin_policy_matches_normalized_request_host(origin, host, allowed):
+def test_websocket_origin_policy_matches_normalized_request_host(scheme, origin, host, allowed):
     policy = importlib.import_module("websocket_security").WebSocketOriginPolicy()
-    scope = websocket_scope([(b"origin", origin.encode()), (b"host", host.encode())])
+    scope = websocket_scope([(b"origin", origin.encode()), (b"host", host.encode())], scheme=scheme)
     assert policy.allows(scope) is allowed
 
 
@@ -765,7 +771,9 @@ def test_allowed_origin_configuration_rejects_invalid_entries(value):
     ([(b"host", b"localhost:8765")], "", True),
     ([(b"origin", b"http://localhost:8765"), (b"host", b"localhost:8765")], "", True),
     ([(b"origin", b"http://127.0.0.1:5173"), (b"host", b"127.0.0.1:5173")], "", True),
-    ([(b"origin", b"https://public.example"), (b"host", b"public.example")], "", True),
+    ([(b"origin", b"https://public.example"), (b"host", b"public.example")], "", False),
+    ([(b"origin", b"https://public.example"), (b"host", b"public.example")],
+     "https://PUBLIC.example:443", True),
     ([(b"origin", b"https://public.example"), (b"host", b"internal:8765")],
      "https://PUBLIC.example:443", True),
     ([(b"origin", b"https://evil.example"), (b"host", b"localhost:8765")], "", False),
@@ -781,6 +789,34 @@ def test_allowed_origin_configuration_rejects_invalid_entries(value):
 ])
 def test_websocket_endpoint_enforces_origin_before_transcript_access(headers, extra_origins,
                                                                    allowed, root_path):
+    assert_websocket_access(websocket_scope(headers, root_path), extra_origins, allowed)
+
+
+@pytest.mark.parametrize("root_path", ["", "/translator"])
+@pytest.mark.parametrize("scheme,origin,host,allowed", [
+    ("wss", "http://transcripts.example", "transcripts.example", False),
+    ("wss", "http://transcripts.example", "transcripts.example:443", False),
+    ("wss", "http://transcripts.example:443", "transcripts.example", False),
+    ("wss", "http://transcripts.example:443", "transcripts.example:443", False),
+    ("wss", "http://transcripts.example:8765", "transcripts.example:8765", False),
+    ("ws", "https://transcripts.example", "transcripts.example", False),
+    ("ws", "https://transcripts.example", "transcripts.example:80", False),
+    ("ws", "https://transcripts.example:80", "transcripts.example", False),
+    ("ws", "https://transcripts.example:80", "transcripts.example:80", False),
+    ("ws", "https://transcripts.example:8765", "transcripts.example:8765", False),
+    ("wss", "https://transcripts.example", "transcripts.example", True),
+    ("wss", "https://transcripts.example", "transcripts.example:443", True),
+    ("ws", "http://transcripts.example", "transcripts.example", True),
+    ("ws", "http://transcripts.example", "transcripts.example:80", True),
+])
+def test_websocket_endpoint_uses_trusted_scheme(scheme, origin, host, allowed, root_path):
+    headers = [(b"origin", origin.encode()), (b"host", host.encode()),
+               (b"x-forwarded-proto", b"https" if scheme == "ws" else b"http")]
+    assert_websocket_access(websocket_scope(headers, root_path, scheme), "", allowed)
+
+
+def assert_websocket_access(scope, extra_origins, allowed):
+    """Exercise the real route and broadcast loop, including registration and cleanup."""
     module = importlib.import_module("translator_runtime")
     runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({
         "TRANSLATOR_ALLOWED_ORIGINS": extra_origins,
@@ -816,7 +852,7 @@ def test_websocket_endpoint_enforces_origin_before_transcript_access(headers, ex
             if message["type"] == "websocket.send":
                 delivered.set()
 
-        await asyncio.wait_for(application(websocket_scope(headers, root_path), receive, send), 2)
+        await asyncio.wait_for(application(scope, receive, send), 2)
 
     asyncio.run(exercise())
     assert runtime.clients == []

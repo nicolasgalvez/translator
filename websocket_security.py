@@ -46,9 +46,9 @@ class WebSocketOriginPolicy:
             return False
         try:
             origin = self._normalize_origin(origins[0].decode("ascii"))
-            # Use the browser's scheme for defaults, including TLS termination
-            # at a proxy. Forwarded headers and the internal server do not establish trust.
-            scheme = origin.split(":", 1)[0]
+            # The server's connection scheme defines same-origin and default ports.
+            # TLS termination with a different internal scheme needs an explicit origin.
+            scheme = {"ws": "http", "wss": "https"}.get(scope.get("scheme"))
             host_origin = self._normalize_origin(f"{scheme}://{hosts[0].decode('ascii')}")
         except (ValueError, UnicodeDecodeError):
             return False

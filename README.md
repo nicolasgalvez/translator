@@ -109,11 +109,13 @@ Captures system audio in real time, transcribes Spanish with Whisper, saves tran
 
 The live-transcript WebSocket at `/ws` accepts browser connections whose Origin
 matches the request Host, normalizing hostname casing, IPv6 addresses, and default
-HTTP(S) ports. The frontend development proxy preserves Host and works without
-additional configuration. TLS-terminating proxies can preserve the public Host;
-the browser Origin supplies the scheme when comparing default ports.
+HTTP(S) ports. The trusted ASGI connection scheme determines the request origin
+(`ws` maps to `http`; `wss` maps to `https`), including default ports. The frontend
+development proxy preserves Host and the scheme and works without additional
+configuration.
 
-If a trusted proxy rewrites Host, configure the browser's public origin explicitly:
+If a trusted proxy rewrites Host or terminates TLS while leaving a different
+internal ASGI scheme, configure the browser's public origin explicitly:
 
 ```bash
 TRANSLATOR_ALLOWED_ORIGINS=https://transcripts.example,http://127.0.0.1:5173 ./run.sh
