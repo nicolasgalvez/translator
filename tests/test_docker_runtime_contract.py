@@ -11,6 +11,33 @@ def read(name):
     return (REPOSITORY_ROOT / name).read_text(encoding="utf-8")
 
 
+def docker_workflow_paths():
+    workflow = read(".github/workflows/docker.yml")
+    pull_request_paths = workflow.split("paths: &docker_paths", maxsplit=1)[1]
+    pull_request_paths = pull_request_paths.split("push:", maxsplit=1)[0]
+    return re.findall(r'^\s+- "([^"]+)"$', pull_request_paths, flags=re.MULTILINE)
+
+
+def github_path_matches(pattern, path):
+    """Match the *, **, and ? forms used by this workflow's path filters."""
+    expression = ""
+    index = 0
+    while index < len(pattern):
+        if pattern[index:index + 2] == "**":
+            expression += ".*"
+            index += 2
+        elif pattern[index] == "*":
+            expression += "[^/]*"
+            index += 1
+        elif pattern[index] == "?":
+            expression += "[^/]"
+            index += 1
+        else:
+            expression += re.escape(pattern[index])
+            index += 1
+    return re.fullmatch(expression, path) is not None
+
+
 def test_image_uses_the_locked_python_3_11_environment():
     dockerfile = read("Dockerfile")
 
@@ -60,3 +87,23 @@ def test_ci_builds_and_smoke_tests_the_final_runtime_image():
     assert "Build and smoke test the runtime image" in workflow
     assert "import ctranslate2, faster_whisper, torch" in smoke_script
     assert 'torch.version.cuda == "12.4"' in smoke_script
+
+
+def test_docker_ci_runs_for_every_kind_of_production_runtime_input():
+    paths = docker_workflow_paths()
+    runtime_inputs = (
+        "app.py",
+        "audio_devices.py",
+        "translator_runtime.py",
+        "transcription/faster_whisper_backend.py",
+        "templates/index.html",
+        "plugins/example.py",
+    )
+
+    uncovered = [
+        path
+        for path in runtime_inputs
+        if not any(github_path_matches(pattern, path) for pattern in paths)
+    ]
+
+    assert uncovered == []

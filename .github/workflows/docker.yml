@@ -5,10 +5,9 @@ name: Docker
 # single PR — more than this check costs on the rare PR that actually touches the
 # image. A top-level `paths:` filter is evaluated by GitHub for free.
 #
-# The frontend stage is built in full: it is cheap, and `npm ci` against the lock
-# file is where the realistic breakage lives. The CUDA stage is only linted, not
-# built — nvidia/cuda plus torch is several GB, and spending ten minutes pulling
-# layers per PR to prove apt-get still works is not a trade worth making.
+# The frontend stage is built separately so `npm ci` exposes lockfile drift directly.
+# The final CUDA runtime is also built and smoke-tested because linting cannot prove
+# the locked Python environment or published HTTP service works.
 on:
   pull_request:
     paths: &docker_paths
@@ -18,6 +17,10 @@ on:
       - "docker-compose.yml"
       - "pyproject.toml"
       - "uv.lock"
+      - "*.py"
+      - "transcription/**"
+      - "templates/**"
+      - "plugins/**"
       - "frontend/**"
       - "scripts/check-docker-context.sh"
       - "scripts/smoke-docker-runtime.sh"
