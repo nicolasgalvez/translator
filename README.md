@@ -179,6 +179,23 @@ an advertised Content-Length above the cap is rejected before the body is read.
 Uploaded files and generated subtitles use server-generated storage names; the
 original upload filename is retained as job metadata.
 
+Caption processing uses one worker and two waiting slots by default. Uploads in
+progress also occupy slots; a fourth unfinished upload receives HTTP 429 with a
+`Retry-After` header. Set `TRANSLATOR_CAPTION_CONCURRENCY` and
+`TRANSLATOR_CAPTION_QUEUE_CAPACITY` to positive integers to change these limits.
+Whisper inference and Argos translation resources are serialized across workers;
+live transcription shares the same Whisper lock.
+
+Completed and failed jobs, including their files, expire after 24 hours. Set
+`TRANSLATOR_CAPTION_RETENTION_SECONDS` to a positive integer to change retention.
+Cleanup runs at startup, on caption requests, and at least once per minute.
+Expired job status and downloads return HTTP 404. Old generated job directories
+from prior runs are also removed. Jobs are held in memory: restarting cancels
+unfinished work and does not restore prior job status.
+Downloads require a retained job record, so prior-run or expired artifacts are
+unavailable even if a filesystem error delays their deletion; cleanup retries
+those old generated directories on later sweeps.
+
 ## Docker
 
 ```bash

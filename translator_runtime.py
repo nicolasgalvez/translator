@@ -25,6 +25,7 @@ from audio_pipeline import (
     SAMPLE_RATE, CAPTURE_CHUNK, CAPTURE_QUEUE_CAPACITY, UTTERANCE_QUEUE_CAPACITY,
     DropOldestQueue, UtteranceChunker,
 )
+from caption_jobs import CaptionJobManager
 from language import LanguageOption
 from plugin_loader import load_plugins
 from transcript_events import process_transcript_text, queue_transcript_render_event
@@ -49,6 +50,9 @@ class RuntimeConfig:  # pylint: disable=too-many-instance-attributes
     language: LanguageOption
     max_upload_bytes: int
     allowed_origins: frozenset[str] = frozenset()
+    caption_concurrency: int = 1
+    caption_queue_capacity: int = 2
+    caption_retention_seconds: int = 86400
 
     @classmethod
     def from_environment(cls, environ):
@@ -84,9 +88,20 @@ class RuntimeConfig:  # pylint: disable=too-many-instance-attributes
             raise ValueError(
                 "TRANSLATOR_ALLOWED_ORIGINS must contain exact HTTP(S) origins"
             ) from exc
+        caption_settings = []
+        for name, default in (("CONCURRENCY", "1"), ("QUEUE_CAPACITY", "2"),
+                              ("RETENTION_SECONDS", "86400")):
+            variable = f"TRANSLATOR_CAPTION_{name}"
+            try:
+                value = int(environ.get(variable, default))
+                if value <= 0:
+                    raise ValueError
+            except ValueError as exc:
+                raise ValueError(f"{variable} must be a positive integer") from exc
+            caption_settings.append(value)
         return cls(values["HOST"], port, values["MODEL"], values["DEVICE"],
                    values["BACKEND"], LanguageOption.from_env(environ), max_upload_bytes,
-                   allowed_origins)
+                   allowed_origins, *caption_settings)
 
 
 class UploadTooLargeError(Exception):
@@ -94,7 +109,6 @@ class UploadTooLargeError(Exception):
 
 
 # The runtime owns the existing application surface and its resources together.
-# Further separation of caption scheduling and backend access belongs to follow-up work.
 # pylint: disable=too-many-instance-attributes,too-many-public-methods
 class TranslatorRuntime:
     """One lifespan's audio, model, session, clients, and background work."""
@@ -106,7 +120,10 @@ class TranslatorRuntime:
         self.captions_dir = Path("captions")
         self.frontend_dist = Path("frontend/dist")
         self.templates = Jinja2Templates(directory="templates")
-        self.caption_jobs: dict[str, dict] = {}
+        self.caption_manager = CaptionJobManager(self)
+        self.caption_jobs = self.caption_manager.jobs
+        self._backend_lock = threading.Lock()
+        self._translation_lock = threading.Lock()
         self.clients: list[WebSocket] = []
         self.text_queue: queue.Queue[dict] = queue.Queue()
         self.audio_chunk_queue = DropOldestQueue(CAPTURE_QUEUE_CAPACITY, "capture")
@@ -144,6 +161,8 @@ class TranslatorRuntime:
 
             self.transcripts_dir.mkdir(exist_ok=True)
             self.captions_dir.mkdir(exist_ok=True)
+            await asyncio.to_thread(self.caption_manager.sweep)
+            self.caption_manager.start()
             session_stem = datetime.now().strftime("%Y-%m-%d_%H%M%S")
             self.transcript_file = self.transcripts_dir / f"{session_stem}.jsonl"
             self.audio_file = self.transcripts_dir / f"{session_stem}.wav"
@@ -169,6 +188,7 @@ class TranslatorRuntime:
     async def stop(self):
         """Signal workers and bound joins so an external inference cannot hang shutdown."""
         self._stopping.set()
+        self.caption_manager.stop()
         self.audio_chunk_queue.close()
         self.utterance_queue.close()
         errors = []
@@ -327,10 +347,13 @@ class TranslatorRuntime:
         if self._stopping.is_set():
             return
         audio_16k = resample_poly(audio, 1, 3).astype(np.float32)
-        segments, _ = backend.transcribe(
-            audio_16k, language=self.config.language.code, beam_size=1,
-        )
-        text = self.extract_text(segments)
+        with self._backend_lock:
+            if self._stopping.is_set():
+                return
+            segments, _ = backend.transcribe(
+                audio_16k, language=self.config.language.code, beam_size=1,
+            )
+            text = self.extract_text(segments)
         if self._stopping.is_set():
             return
         context = {"backend": backend.name, "model": self.config.model}
@@ -454,6 +477,10 @@ class TranslatorRuntime:
 
     def ensure_argos_packages(self, job: dict):
         """Install argostranslate language packages if not already present."""
+        with self._translation_lock:
+            self._ensure_argos_packages(job)
+
+    def _ensure_argos_packages(self, job: dict):
         self._check_running()
         import argostranslate.package  # pylint: disable=import-outside-toplevel
 
@@ -501,7 +528,9 @@ class TranslatorRuntime:
                 # Too short — fall back to file-level detection
                 seg["language"] = detected_lang
             else:
-                lang, _ = backend.detect_language(audio_slice)
+                with self._backend_lock:
+                    self._check_running()
+                    lang, _ = backend.detect_language(audio_slice)
                 seg["language"] = lang
 
             if (i + 1) % 10 == 0:
@@ -510,6 +539,11 @@ class TranslatorRuntime:
 
     def build_srt_entries(self, segments: list[dict], job: dict) -> tuple[list[dict], list[dict]]:
         """Return (as-spoken entries, translated entries), each segment flipped es<->en."""
+        with self._translation_lock:
+            self._check_running()
+            return self._build_srt_entries(segments, job)
+
+    def _build_srt_entries(self, segments: list[dict], job: dict):
         # Lazy import: argostranslate is only needed by the captions pipeline.
         import argostranslate.translate  # pylint: disable=import-outside-toplevel
 
@@ -541,14 +575,15 @@ class TranslatorRuntime:
     def transcribe_segments(self, audio_array: np.ndarray, job: dict) -> tuple[list[dict], str]:
         """Transcribe a whole file. Returns (segment dicts, file-level detected language)."""
         backend = self.backend
-        self._check_running()
-        segments_raw, detected_lang = backend.transcribe(
-            audio_array, beam_size=5, vad_filter=True,
-        )
-        segments = [
-            {"start": seg.start, "end": seg.end, "text": seg.text}
-            for seg in segments_raw
-        ]
+        with self._backend_lock:
+            self._check_running()
+            segments_raw, detected_lang = backend.transcribe(
+                audio_array, beam_size=5, vad_filter=True,
+            )
+            segments = [
+                {"start": seg.start, "end": seg.end, "text": seg.text}
+                for seg in segments_raw
+            ]
         job.update(progress=45, message=f"Transcribed {len(segments)} segments...")
         return segments, detected_lang
 
@@ -630,6 +665,8 @@ class TranslatorRuntime:
         except Exception as e:  # pylint: disable=broad-exception-caught
             job.update(status="error", message=str(e)[:300])
             print(f"Caption job {job_id} error: {e}", flush=True)
+        finally:
+            self.caption_manager.complete(job_id)
 
     async def captions_page(self, request: Request):
         return self.templates.TemplateResponse(request=request, name="captions.html")
@@ -639,6 +676,7 @@ class TranslatorRuntime:
         size = 0
         with open(video_path, "xb") as destination:
             while chunk := await file.read(1024 * 1024):
+                self._check_running()
                 size += len(chunk)
                 if size > self.config.max_upload_bytes:
                     raise UploadTooLargeError(
@@ -654,46 +692,45 @@ class TranslatorRuntime:
         try:
             try:
                 self._check_running()
+                await asyncio.to_thread(self.caption_manager.sweep)
+                if not self.caption_manager.reserve(job_id):
+                    return JSONResponse(
+                        {"error": "Caption capacity is full; retry after current jobs finish"},
+                        status_code=429, headers={"Retry-After": "5"},
+                    )
                 job_dir.mkdir(parents=True)
                 created = True
                 await self._store_caption_upload(file, video_path)
             finally:
                 await file.close()
 
-            self.caption_jobs[job_id] = {
-                "status": "queued",
-                "progress": 0,
-                "message": "Queued...",
-                "files": [],
-                "original_filename": file.filename,
-            }
             self._check_running()
-            thread = threading.Thread(
-                target=self.caption_worker, args=(job_id, video_path), daemon=True,
-            )
-            thread.start()
-            self.worker_threads.append(thread)
+            self.caption_manager.submit(job_id, video_path, file.filename)
         except BaseException as exc:
-            if created:
-                self.caption_jobs.pop(job_id, None)
-                video_path.unlink(missing_ok=True)
-                job_dir.rmdir()
+            try:
+                if created:
+                    video_path.unlink(missing_ok=True)
+                    job_dir.rmdir()
+            finally:
+                self.caption_manager.cancel_upload(job_id)
             if isinstance(exc, UploadTooLargeError):
                 return JSONResponse({"error": str(exc)}, status_code=413)
             raise
         return JSONResponse({"job_id": job_id})
 
     async def captions_status(self, job_id: str):
+        await asyncio.to_thread(self.caption_manager.sweep)
         job = self.caption_jobs.get(job_id)
         if not job:
             return JSONResponse({"error": "Job not found"}, status_code=404)
         return JSONResponse(job)
 
     async def captions_download(self, job_id: str, filename: str):
+        await asyncio.to_thread(self.caption_manager.sweep)
         # Prevent path traversal
         if ".." in filename or "/" in filename:
             return JSONResponse({"error": "Invalid filename"}, status_code=400)
-        path = self.captions_dir / job_id / filename
-        if not path.exists():
+        try:
+            return await self.caption_manager.download_response(job_id, filename)
+        except OSError:
             return JSONResponse({"error": "File not found"}, status_code=404)
-        return FileResponse(path, filename=filename, media_type="application/x-subrip")
