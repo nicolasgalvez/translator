@@ -132,6 +132,7 @@ def test_upload_uses_server_filename_and_preserves_metadata(upload_runtime, tmp_
     runtime, entered, inputs = upload_runtime
     if filename == "absolute":
         filename = str(tmp_path / "escaped.mp4")
+    upload_content = b"v" * 1048579 if filename == "video.mp4" else b"video content"
     application = importlib.import_module("app").create_app()
     application.state.runtime = runtime
 
@@ -140,7 +141,7 @@ def test_upload_uses_server_filename_and_preserves_metadata(upload_runtime, tmp_
             transport=httpx.ASGITransport(app=application), base_url="http://test",
         ) as client:
             response = await client.post(
-                "/captions/upload", files={"file": (filename, b"video content")},
+                "/captions/upload", files={"file": (filename, upload_content)},
             )
             assert response.status_code == 200
             payload = response.json()
@@ -151,7 +152,7 @@ def test_upload_uses_server_filename_and_preserves_metadata(upload_runtime, tmp_
             path, content = inputs[0]
             assert path.parent == job_dir
             assert path.name not in (filename, "audio.wav")
-            assert content == b"video content"
+            assert content == upload_content
             assert list(job_dir.iterdir()) == [path]
             assert sorted(tmp_path.iterdir()) == [runtime.captions_dir]
             status = await client.get(f"/captions/status/{payload['job_id']}")
@@ -228,6 +229,74 @@ def test_upload_checks_size_before_writing_and_closes_rejection(upload_runtime, 
     assert not list(runtime.captions_dir.iterdir())
     assert not runtime.caption_jobs
     assert not entered.is_set()
+
+
+@pytest.mark.parametrize("content_length", [None, "1", "1000000000"])
+def test_upload_request_limit_stops_multipart_spooling(
+    upload_runtime, monkeypatch, content_length,
+):
+    runtime, entered, _inputs = upload_runtime
+    application = importlib.import_module("app").create_app()
+    application.state.runtime = runtime
+    parser_module = importlib.import_module("starlette.formparsers")
+    original_spool = parser_module.SpooledTemporaryFile
+    observed = SimpleNamespace(spools=[], consumed=0, handler_entered=False)
+
+    class ObservedSpool(original_spool):  # pylint: disable=too-few-public-methods
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.saved_size = 0
+            observed.spools.append(self)
+
+        def close(self):
+            if not self.closed:
+                self.saved_size = self.tell()
+            super().close()
+
+    monkeypatch.setattr(parser_module, "SpooledTemporaryFile", ObservedSpool)
+    original_upload = runtime.captions_upload
+
+    async def observe_handler(file):
+        observed.handler_entered = True
+        return await original_upload(file)
+
+    monkeypatch.setattr(runtime, "captions_upload", observe_handler)
+
+    async def multipart_body():
+        yield (b'--boundary\r\nContent-Disposition: form-data; name="file"; '
+               b'filename="video.mp4"\r\nContent-Type: video/mp4\r\n\r\n')
+        for _ in range(64):
+            observed.consumed += 65536
+            yield b"v" * 65536
+        yield b"\r\n--boundary--\r\n"
+
+    async def exercise():
+        headers = {"content-type": "multipart/form-data; boundary=boundary"}
+        if content_length is not None:
+            headers["content-length"] = content_length
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=application), base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/captions/upload", headers=headers, content=multipart_body(),
+            )
+        assert response.status_code == 413
+        assert response.json() == {"error": "Upload exceeds maximum size of 1048579 bytes"}
+        assert not observed.handler_entered
+        if content_length == "1000000000":
+            assert observed.consumed == 0
+            assert not observed.spools
+        else:
+            assert 0 < observed.consumed <= 1048579 + 65536 + 65536
+            assert len(observed.spools) == 1
+            assert observed.spools[0].closed
+            assert 0 < observed.spools[0].saved_size <= 1048579 + 65536
+        assert not runtime.captions_dir.exists()
+        assert not runtime.caption_jobs
+        assert not runtime.worker_threads
+        assert not entered.is_set()
+
+    asyncio.run(exercise())
 
 
 @pytest.mark.parametrize("failure", ["write", "thread_start", "mkdir"])

@@ -9,6 +9,7 @@ from fastapi import FastAPI, File, Request, UploadFile, WebSocket
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from caption_uploads import CaptionUploadLimitMiddleware, UploadRequestTooLargeError
 from translator_runtime import RuntimeConfig, TranslatorRuntime
 
 
@@ -29,6 +30,8 @@ def create_app(runtime_factory=default_runtime_factory) -> FastAPI:
             await runtime.stop()
 
     application = FastAPI(lifespan=lifespan)
+    application.add_middleware(CaptionUploadLimitMiddleware)
+    application.add_exception_handler(UploadRequestTooLargeError, UploadRequestTooLargeError.handle)
     assets = Path("frontend/dist/assets")
     if assets.exists():
         application.mount("/assets", StaticFiles(directory=assets), name="assets")
