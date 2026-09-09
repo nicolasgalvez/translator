@@ -173,6 +173,15 @@ Clients without an Origin header are allowed for non-browser integrations.
 Origin protection is not authentication: non-browser clients can omit or forge
 Origin, so restrict network access to trusted clients.
 
+Each accepted client has an independent queue of 32 transcript messages and a
+one-second network-send limit. Set `TRANSLATOR_WEBSOCKET_QUEUE_CAPACITY` to a
+positive integer to change the queue limit. A client that fills its queue or
+times out is disconnected with WebSocket code 1013 (Try Again Later); a failed
+socket is closed with code 1011. Slow or failed clients do not delay delivery to
+healthy clients. Shutdown does not wait indefinitely for a transport that
+delays cancellation; timed-out socket operations remain observed until they
+exit.
+
 ### Transcript History (`/history`)
 
 Browse saved transcript sessions. Each session saves a `.jsonl` transcript and a `.wav` audio recording.
