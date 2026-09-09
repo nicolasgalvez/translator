@@ -11,6 +11,7 @@ on:
   pull_request:
     paths: &frontend_paths
       - "frontend/**"
+      - "templates/captions.html"
       - ".github/workflows/frontend.yml"
   push:
     branches: [main]
