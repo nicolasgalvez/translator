@@ -30,11 +30,10 @@ afterEach(() => {
 
 it("runs frontend CI when the caption template changes", () => {
   const pathBlock = frontendWorkflow.match(
-    /paths: &frontend_paths\n(?<paths>(?:\s+- .+\n)+)/,
+    /    paths:\n(?<paths>(?:\s+- .+\n)+)/,
   )?.groups?.paths
 
   expect(pathBlock).toContain('- "templates/captions.html"')
-  expect(frontendWorkflow).toContain("paths: *frontend_paths")
 })
 
 describe("caption controls", () => {

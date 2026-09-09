@@ -1,8 +1,14 @@
 name: Dependency Audit
 
 on:
-  pull_request:
-    paths: &dependency_audit_paths
+  workflow_call:
+    inputs:
+      candidate_sha:
+        required: true
+        type: string
+  push:
+    branches: [main]
+    paths:
       - "pyproject.toml"
       - "uv.lock"
       - "dependency-audit/pyproject.toml"
@@ -13,15 +19,12 @@ on:
       - "tests/test_dependency_audit.py"
       - "tests/test_dependency_security_contract.py"
       - ".github/workflows/dependency-audit.yml"
-  push:
-    branches: [main]
-    paths: *dependency_audit_paths
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-dependency-audit-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -47,6 +50,9 @@ jobs:
             platform: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
+          persist-credentials: false
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
@@ -54,10 +60,9 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: "0.12.12"
-          enable-cache: true
-          cache-dependency-glob: |
-            uv.lock
-            dependency-audit/uv.lock
+          enable-cache: false
+          restore-cache: false
+          save-cache: false
       - name: Export locked production graph for target platform
         run: |
           uv export --locked --no-default-groups --extra ${{ matrix.extra }} --no-emit-project --emit-index-url --output-file requirements-${{ matrix.name }}.in
@@ -72,6 +77,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
+          persist-credentials: false
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
@@ -79,8 +87,9 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: "0.12.12"
-          enable-cache: true
-          cache-dependency-glob: uv.lock
+          enable-cache: false
+          restore-cache: false
+          save-cache: false
       - name: Install locked runtime
         run: uv sync --locked --group dev --extra cpu
       - name: Verify Argos and Stanza compatibility

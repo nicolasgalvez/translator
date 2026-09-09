@@ -2,6 +2,10 @@ name: Actionlint
 
 on:
   workflow_call:
+    inputs:
+      candidate_sha:
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -13,6 +17,9 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
+          persist-credentials: false
 
       - name: Validate workflows and embedded shell
         env:

@@ -80,7 +80,7 @@ def test_dependency_audit_exports_the_locked_production_graph():
     workflow = read(workflow_path)
 
     for fragment in (
-        "  pull_request:",
+        "  workflow_call:",
         "  push:",
         "    branches: [main]",
         '      - "pyproject.toml"',

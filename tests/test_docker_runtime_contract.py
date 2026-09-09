@@ -24,9 +24,9 @@ def load_toml(name):
 
 def docker_workflow_paths():
     workflow = read(".github/workflows/docker.yml")
-    pull_request_paths = workflow.split("paths: &docker_paths", maxsplit=1)[1]
-    pull_request_paths = pull_request_paths.split("push:", maxsplit=1)[0]
-    return re.findall(r'^\s+- "([^"]+)"$', pull_request_paths, flags=re.MULTILINE)
+    push_paths = workflow.split("  push:", maxsplit=1)[1]
+    push_paths = push_paths.split("permissions:", maxsplit=1)[0]
+    return re.findall(r'^\s+- "([^"]+)"$', push_paths, flags=re.MULTILINE)
 
 
 def github_path_matches(pattern, path):

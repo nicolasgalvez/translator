@@ -1,30 +1,30 @@
 name: Frontend
 
-# Same shape as docker.yml, for the same reason: a top-level `paths:` filter is
-# evaluated by GitHub for free, whereas wiring this into ci.yml's orchestrator
-# would need a paths-filter job billing a runner minute on every PR.
-#
 # Runs the build as well as the tests. `npm run build` is `tsc && vite build`,
 # so it is the only thing here that catches a type regression — a green test
-# suite will not.
+# suite will not. Required calls this workflow for applicable pull requests;
+# the push filter keeps its independent main-branch coverage.
 on:
-  pull_request:
-    paths: &frontend_paths
+  workflow_call:
+    inputs:
+      candidate_sha:
+        required: true
+        type: string
+  push:
+    branches: [main]
+    paths:
       - "Dockerfile"
       - "README.md"
       - "frontend/**"
       - "run.sh"
       - "templates/captions.html"
       - ".github/workflows/frontend.yml"
-  push:
-    branches: [main]
-    paths: *frontend_paths
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-frontend-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 defaults:
@@ -38,14 +38,16 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
+          persist-credentials: false
 
       - uses: actions/setup-node@v7
         with:
           # Matches the node:26-bookworm-slim base in the Dockerfile, so CI
           # and the image agree on the runtime.
           node-version: "26"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          package-manager-cache: false
 
       # Fails when package.json and package-lock.json have drifted.
       - name: Install
