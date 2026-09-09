@@ -18,6 +18,7 @@ class CaptionJobManager:  # pylint: disable=too-many-instance-attributes
         self._occupied = set()
         self._retired = set()
         self._cleaning = set()
+        self._downloads = {}
         self._sweep_lock = threading.Lock()
         self._stopped = threading.Event()
         self._started = False
@@ -82,6 +83,21 @@ class CaptionJobManager:  # pylint: disable=too-many-instance-attributes
                 job["completed_at"] = time.time()
             self._occupied.discard(job_id)
 
+    def read_download(self, job_id, filename):
+        """Claim retained data atomically and return bytes independent of disk lifetime."""
+        with self._lock:
+            self._retire_expired(time.time() - self.runtime.config.caption_retention_seconds)
+            if job_id not in self.jobs or job_id in self._cleaning:
+                raise FileNotFoundError("Caption job is no longer retained")
+            self._downloads[job_id] = self._downloads.get(job_id, 0) + 1
+        try:
+            return (self.runtime.captions_dir / job_id / filename).read_bytes()
+        finally:
+            with self._lock:
+                self._downloads[job_id] -= 1
+                if not self._downloads[job_id]:
+                    del self._downloads[job_id]
+
     def stop(self):
         with self._lock:
             self._stopped.set()
@@ -137,7 +153,8 @@ class CaptionJobManager:  # pylint: disable=too-many-instance-attributes
         # The claim prevents a reservation from reusing the ID until deletion finishes.
         # Filesystem work never holds the scheduling lock.
         with self._lock:
-            if job_id in self.jobs or job_id in self._occupied or job_id in self._cleaning:
+            if (job_id in self.jobs or job_id in self._occupied or job_id in self._cleaning
+                    or job_id in self._downloads):
                 return
             self._cleaning.add(job_id)
             self._retired.add(job_id)

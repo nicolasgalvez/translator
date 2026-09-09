@@ -15,9 +15,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 
 from fastapi import WebSocket, WebSocketDisconnect, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
@@ -727,12 +728,16 @@ class TranslatorRuntime:
 
     async def captions_download(self, job_id: str, filename: str):
         await asyncio.to_thread(self.caption_manager.sweep)
-        if job_id not in self.caption_jobs:
-            return JSONResponse({"error": "Job not found"}, status_code=404)
         # Prevent path traversal
         if ".." in filename or "/" in filename:
             return JSONResponse({"error": "Invalid filename"}, status_code=400)
-        path = self.captions_dir / job_id / filename
-        if not path.exists():
+        try:
+            content = await asyncio.to_thread(self.caption_manager.read_download, job_id, filename)
+        except OSError:
             return JSONResponse({"error": "File not found"}, status_code=404)
-        return FileResponse(path, filename=filename, media_type="application/x-subrip")
+        encoded_filename = quote(filename)
+        disposition = (f"attachment; filename*=utf-8''{encoded_filename}"
+                       if encoded_filename != filename else f'attachment; filename="{filename}"')
+        return Response(content, media_type="application/x-subrip", headers={
+            "Content-Disposition": disposition,
+        })

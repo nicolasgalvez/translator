@@ -583,6 +583,219 @@ def test_caption_orphan_selection_cannot_delete_a_new_reservation(tmp_path, monk
     runtime.caption_manager.cancel_upload(job_id)
 
 
+@pytest.fixture(name="download_runtime")
+def fixture_download_runtime(tmp_path):
+    module = importlib.import_module("translator_runtime")
+
+    class Runtime(module.TranslatorRuntime):  # pylint: disable=too-few-public-methods
+        async def start(self):
+            pass
+
+    runtime = Runtime(module.RuntimeConfig.from_environment({
+        "TRANSLATOR_CAPTION_RETENTION_SECONDS": "1",
+    }))
+    runtime.captions_dir = tmp_path / "captions"
+    job_id = "0123456789ab"
+    path = runtime.captions_dir / job_id / "video.original.srt"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"1\n00:00:00,000 --> 00:00:01,000\nHello\n")
+    runtime.caption_jobs[job_id] = {"status": "done", "completed_at": 1000,
+                                    "files": [path.name]}
+    return runtime, job_id, path
+
+
+def test_caption_download_body_survives_expiry_after_response_headers(
+    download_runtime, monkeypatch,
+):
+    runtime, job_id, path = download_runtime
+    application = importlib.import_module("app")
+    now = [1000.9]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    messages = []
+    content = path.read_bytes()
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        messages.append(message)
+        if message["type"] == "http.response.start":
+            assert message["status"] == 200
+            now[0] = 1001
+            await asyncio.to_thread(runtime.caption_manager.sweep)
+            assert job_id not in runtime.caption_jobs
+            assert not path.exists()
+
+    async def exercise():
+        app = application.create_app(lambda: runtime)
+        async with app.router.lifespan_context(app):
+            await app({"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+                       "method": "GET", "scheme": "http", "headers": [], "query_string": b"",
+                       "path": f"/captions/download/{job_id}/{path.name}", "root_path": "",
+                       "server": ("test", 80), "client": ("test", 1234)}, receive, send)
+
+    asyncio.run(exercise())
+    assert b"".join(message.get("body", b"") for message in messages) == content
+    headers = dict(messages[0]["headers"])
+    assert headers[b"content-type"] == b"application/x-subrip"
+    assert headers[b"content-length"] == str(len(content)).encode()
+    assert headers[b"content-disposition"] == b'attachment; filename="video.original.srt"'
+
+
+def test_caption_download_claim_protects_read_and_rejects_requests_after_retirement(
+    download_runtime, monkeypatch,
+):
+    runtime, job_id, path = download_runtime
+    application = importlib.import_module("app")
+    now = [1000.9]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    reading, release = threading.Event(), threading.Event()
+    original_read = Path.read_bytes
+    content = original_read(path)
+
+    def slow_read(candidate):
+        if candidate == path:
+            reading.set()
+            assert release.wait(3)
+        return original_read(candidate)
+
+    monkeypatch.setattr(Path, "read_bytes", slow_read)
+
+    async def exercise():
+        app = application.create_app(lambda: runtime)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                         base_url="http://test") as client:
+                request = asyncio.create_task(client.get(
+                    f"/captions/download/{job_id}/{path.name}",
+                ))
+                try:
+                    assert await asyncio.to_thread(reading.wait, 1)
+                    now[0] = 1001
+                    await asyncio.wait_for(asyncio.to_thread(runtime.caption_manager.sweep), 0.5)
+                    assert job_id not in runtime.caption_jobs
+                    assert path.exists()
+                    rejected = await client.get(f"/captions/download/{job_id}/{path.name}")
+                    assert rejected.status_code == 404
+                finally:
+                    release.set()
+                    response = await request
+                assert response.status_code == 200
+                assert response.content == content
+                await asyncio.to_thread(runtime.caption_manager.sweep)
+                assert not path.exists()
+
+    asyncio.run(exercise())
+
+
+def test_caption_download_read_failure_releases_cleanup_claim(download_runtime, monkeypatch):
+    runtime, job_id, path = download_runtime
+    now = [1000.9]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+
+    def unreadable(_path):
+        raise PermissionError("temporarily unreadable")
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable)
+    response = asyncio.run(runtime.captions_download(job_id, path.name))
+    assert response.status_code == 404
+    now[0] = 1001
+    runtime.caption_manager.sweep()
+    assert not path.exists()
+
+
+def test_caption_download_started_after_cleanup_claim_is_404(download_runtime, monkeypatch):
+    runtime, job_id, path = download_runtime
+    application = importlib.import_module("app")
+    manager_module = importlib.import_module("caption_jobs")
+    monkeypatch.setattr(time, "time", lambda: 1001)
+    cleaning, release = threading.Event(), threading.Event()
+    original_remove = manager_module.shutil.rmtree
+
+    def slow_remove(directory):
+        cleaning.set()
+        assert release.wait(3)
+        original_remove(directory)
+
+    monkeypatch.setattr(manager_module.shutil, "rmtree", slow_remove)
+    sweeper = threading.Thread(target=runtime.caption_manager.sweep)
+    sweeper.start()
+
+    async def exercise():
+        app = application.create_app(lambda: runtime)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                         base_url="http://test") as client:
+                response = await asyncio.wait_for(client.get(
+                    f"/captions/download/{job_id}/{path.name}",
+                ), 0.5)
+                assert response.status_code == 404
+
+    try:
+        assert cleaning.wait(2)
+        asyncio.run(exercise())
+    finally:
+        release.set()
+        sweeper.join(3)
+    assert not path.exists()
+
+
+def test_caption_canceled_download_keeps_lease_until_background_read_finishes(
+    download_runtime, monkeypatch,
+):
+    runtime, job_id, path = download_runtime
+    now = [1000.9]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    reading, release, finished = threading.Event(), threading.Event(), threading.Event()
+    original_read = Path.read_bytes
+
+    def slow_read(candidate):
+        reading.set()
+        assert release.wait(3)
+        try:
+            return original_read(candidate)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(Path, "read_bytes", slow_read)
+
+    async def exercise():
+        request = asyncio.create_task(runtime.captions_download(job_id, path.name))
+        try:
+            assert await asyncio.to_thread(reading.wait, 1)
+            request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+            now[0] = 1001
+            await asyncio.to_thread(runtime.caption_manager.sweep)
+            assert job_id not in runtime.caption_jobs
+            assert path.exists()
+        finally:
+            release.set()
+            assert await asyncio.to_thread(finished.wait, 1)
+        # The executor task releases its lease after read_bytes returns.
+        for _ in range(100):
+            await asyncio.to_thread(runtime.caption_manager.sweep)
+            if not path.exists():
+                break
+            await asyncio.sleep(0.005)
+        assert not path.exists()
+
+    asyncio.run(exercise())
+
+
+def test_caption_download_encodes_attachment_filename(download_runtime, monkeypatch):
+    runtime, job_id, path = download_runtime
+    monkeypatch.setattr(time, "time", lambda: 1000.9)
+    renamed = path.with_name('résumé "original".srt')
+    path.rename(renamed)
+    response = asyncio.run(runtime.captions_download(job_id, renamed.name))
+    assert response.status_code == 200
+    assert response.headers["Content-Disposition"] == (
+        "attachment; filename*=utf-8''r%C3%A9sum%C3%A9%20%22original%22.srt"
+    )
+
+
 def test_audio_silence_retains_only_preroll_without_repeated_copying(tmp_path, monkeypatch):
     importlib.import_module("scipy.signal")
     module = importlib.import_module("translator_runtime")
