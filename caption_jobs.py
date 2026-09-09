@@ -16,6 +16,9 @@ class CaptionJobManager:  # pylint: disable=too-many-instance-attributes
         self.jobs = {}
         self._lock = threading.RLock()
         self._occupied = set()
+        self._retired = set()
+        self._cleaning = set()
+        self._sweep_lock = threading.Lock()
         self._stopped = threading.Event()
         self._started = False
         self._queue = queue.Queue(maxsize=(runtime.config.caption_concurrency +
@@ -27,7 +30,6 @@ class CaptionJobManager:  # pylint: disable=too-many-instance-attributes
                 raise RuntimeError("Runtime stopped")
             if self._started:
                 return
-            self.sweep()
             workers = []
             try:
                 for index in range(self.runtime.config.caption_concurrency):
@@ -48,9 +50,10 @@ class CaptionJobManager:  # pylint: disable=too-many-instance-attributes
 
     def reserve(self, job_id):
         with self._lock:
-            self.sweep()
             if self._stopped.is_set():
                 raise RuntimeError("Runtime stopped")
+            if job_id in self._occupied | self._retired | self._cleaning or job_id in self.jobs:
+                return False
             if len(self._occupied) >= self._queue.maxsize:
                 return False
             self._occupied.add(job_id)
@@ -106,7 +109,10 @@ class CaptionJobManager:  # pylint: disable=too-many-instance-attributes
     def _sweep_loop(self):
         interval = min(60, self.runtime.config.caption_retention_seconds)
         while not self._stopped.wait(interval):
-            self.sweep()
+            try:
+                self.sweep()
+            except Exception:  # pylint: disable=broad-exception-caught
+                logging.exception("Caption retention sweep failed; will retry")
 
     def _remove_directory(self, job_id):
         path = self.runtime.captions_dir / job_id
@@ -118,27 +124,58 @@ class CaptionJobManager:  # pylint: disable=too-many-instance-attributes
         except FileNotFoundError:
             pass
 
-    def sweep(self):
-        """Remove expired records and only old, generated, unowned directories."""
+    def _retire_expired(self, cutoff):
+        """Retire records immediately without waiting for filesystem cleanup."""
         with self._lock:
-            cutoff = time.time() - self.runtime.config.caption_retention_seconds
             for job_id, job in list(self.jobs.items()):
                 if (job_id not in self._occupied and job.get("status") in ("done", "error")
                         and job.get("completed_at", float("inf")) <= cutoff):
-                    try:
-                        self._remove_directory(job_id)
-                    except OSError:
-                        logging.exception("Could not expire caption job %s", job_id)
+                    self._retired.add(job_id)
                     del self.jobs[job_id]
+
+    def _clean_unowned(self, job_id):
+        # The claim prevents a reservation from reusing the ID until deletion finishes.
+        # Filesystem work never holds the scheduling lock.
+        with self._lock:
+            if job_id in self.jobs or job_id in self._occupied or job_id in self._cleaning:
+                return
+            self._cleaning.add(job_id)
+            self._retired.add(job_id)
+        try:
+            self._remove_directory(job_id)
+        except OSError:
+            logging.exception("Could not remove caption directory %s; will retry", job_id)
+        else:
+            with self._lock:
+                self._retired.discard(job_id)
+        finally:
+            with self._lock:
+                self._cleaning.discard(job_id)
+
+    def sweep(self):
+        """Retire state briefly under lock; clean claimed paths outside that lock."""
+        cutoff = time.time() - self.runtime.config.caption_retention_seconds
+        self._retire_expired(cutoff)
+        # Concurrent requests can retire records without waiting for a slow sweep.
+        if not self._sweep_lock.acquire(blocking=False):  # pylint: disable=consider-using-with
+            return
+        try:
+            with self._lock:
+                retired = list(self._retired)
+            for job_id in retired:
+                self._clean_unowned(job_id)
             root = self.runtime.captions_dir
             if not root.is_dir() or root.is_symlink():
                 return
             for path in root.iterdir():
-                if (path.name in self.jobs or path.name in self._occupied or path.is_symlink()
-                        or not re.fullmatch(r"[0-9a-f]{12}", path.name)):
+                if path.is_symlink() or not re.fullmatch(r"[0-9a-f]{12}", path.name):
                     continue
                 try:
                     if path.is_dir() and path.stat().st_mtime <= cutoff:
-                        self._remove_directory(path.name)
+                        self._clean_unowned(path.name)
                 except OSError:
                     logging.exception("Could not remove orphan caption directory %s", path.name)
+        except OSError:
+            logging.exception("Could not inspect caption directories; will retry")
+        finally:
+            self._sweep_lock.release()

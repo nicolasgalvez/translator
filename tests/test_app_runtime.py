@@ -402,7 +402,7 @@ def test_caption_periodic_sweep_expires_failed_job_without_requests(tmp_path):
         wait_until(lambda: "completed_at" in runtime.caption_jobs[job_id])
         assert runtime.caption_jobs[job_id]["message"] == "broken media"
         wait_until(lambda: job_id not in runtime.caption_jobs)
-        assert not (runtime.captions_dir / job_id).exists()
+        wait_until(lambda: not (runtime.captions_dir / job_id).exists())
     finally:
         asyncio.run(runtime.stop())
 
@@ -453,6 +453,134 @@ def test_caption_expiry_hides_jobs_when_artifact_removal_needs_retry(tmp_path, m
         assert job_dir.exists()
     asyncio.run(runtime.captions_status(job_id))
     assert not job_dir.exists()
+
+
+def test_caption_slow_cleanup_keeps_event_loop_stop_and_reservations_responsive(
+    tmp_path, monkeypatch,
+):
+    module = importlib.import_module("translator_runtime")
+    manager_module = importlib.import_module("caption_jobs")
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+    runtime.captions_dir = tmp_path / "captions"
+    job_id = "0123456789ab"
+    directory = runtime.captions_dir / job_id
+    directory.mkdir(parents=True)
+    runtime.caption_jobs[job_id] = {"status": "error", "completed_at": 1}
+    entered, release = threading.Event(), threading.Event()
+    original_remove = manager_module.shutil.rmtree
+
+    def slow_remove(path):
+        entered.set()
+        assert release.wait(5)
+        original_remove(path)
+
+    monkeypatch.setattr(manager_module.shutil, "rmtree", slow_remove)
+
+    async def exercise():
+        began = time.monotonic()
+        response_task = asyncio.create_task(runtime.captions_status(job_id))
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            await asyncio.sleep(0.01)
+            assert time.monotonic() - began < 0.5
+            assert job_id not in runtime.caption_jobs
+            concurrent_status = await runtime.captions_status(job_id)
+            assert concurrent_status.status_code == 404
+            # Reusing a selected cleanup ID must fail until its directory is gone.
+            assert not runtime.caption_manager.reserve(job_id)
+            assert runtime.caption_manager.reserve("abcdefabcdef")
+            await runtime.stop()
+            assert time.monotonic() - began < 0.5
+        finally:
+            release.set()
+            await response_task
+        assert not directory.exists()
+
+    # Release eventually even if the old synchronous sweep blocks the event loop.
+    timer = threading.Timer(1, release.set)
+    timer.start()
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+        timer.cancel()
+
+
+@pytest.mark.parametrize("failure", [PermissionError("temporary access loss"),
+                                    RuntimeError("unexpected filesystem adapter failure")])
+def test_caption_periodic_sweeper_recovers_after_root_listing_failure(
+    tmp_path, monkeypatch, caplog, failure,
+):
+    module = importlib.import_module("translator_runtime")
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({
+        "TRANSLATOR_CAPTION_RETENTION_SECONDS": "1",
+    }))
+    runtime.captions_dir = tmp_path / "captions"
+    orphan = runtime.captions_dir / "0123456789ab"
+    orphan.mkdir(parents=True)
+    (orphan / "old-upload").write_text("data")
+    os.utime(orphan, (1, 1))
+    failed = threading.Event()
+    original_iterdir = Path.iterdir
+
+    def flaky_iterdir(path):
+        if path == runtime.captions_dir and not failed.is_set():
+            failed.set()
+            raise failure
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", flaky_iterdir)
+    # Exercise the real background loop directly, including its recovery boundary.
+    sweeper = threading.Thread(target=runtime.caption_manager._sweep_loop,  # pylint: disable=protected-access
+                               name="caption-retention")
+    runtime.worker_threads.append(sweeper)
+    sweeper.start()
+    try:
+        assert failed.wait(2)
+        wait_until(lambda: not orphan.exists())
+        assert sweeper.is_alive()
+        assert str(failure) in caplog.text
+    finally:
+        asyncio.run(runtime.stop())
+
+
+def test_caption_orphan_selection_cannot_delete_a_new_reservation(tmp_path, monkeypatch):
+    module = importlib.import_module("translator_runtime")
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+    runtime.captions_dir = tmp_path / "captions"
+    job_id = "0123456789ab"
+    directory = runtime.captions_dir / job_id
+    directory.mkdir(parents=True)
+    os.utime(directory, (1, 1))
+    inspected, release = threading.Event(), threading.Event()
+    original_stat = Path.stat
+    calls = []
+
+    def paused_stat(path, *args, **kwargs):
+        result = original_stat(path, *args, **kwargs)
+        if path == directory and threading.current_thread().name == "orphan-sweep":
+            calls.append(True)
+            if len(calls) == 3:  # symlink check, directory check, then age selection
+                inspected.set()
+                assert release.wait(3)
+        return result
+
+    monkeypatch.setattr(Path, "stat", paused_stat)
+    sweeper = threading.Thread(target=runtime.caption_manager.sweep, name="orphan-sweep")
+    sweeper.start()
+    try:
+        assert inspected.wait(2)
+        assert runtime.caption_manager.reserve(job_id)
+        # The uploader owns the ID before the old selection is converted into a claim.
+        directory.rmdir()
+        directory.mkdir()
+        (directory / "new-upload").write_bytes(b"new data")
+    finally:
+        release.set()
+        sweeper.join(3)
+    assert not sweeper.is_alive()
+    assert (directory / "new-upload").read_bytes() == b"new data"
+    runtime.caption_manager.cancel_upload(job_id)
 
 
 def test_audio_silence_retains_only_preroll_without_repeated_copying(tmp_path, monkeypatch):

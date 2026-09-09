@@ -161,6 +161,7 @@ class TranslatorRuntime:
 
             self.transcripts_dir.mkdir(exist_ok=True)
             self.captions_dir.mkdir(exist_ok=True)
+            await asyncio.to_thread(self.caption_manager.sweep)
             self.caption_manager.start()
             session_stem = datetime.now().strftime("%Y-%m-%d_%H%M%S")
             self.transcript_file = self.transcripts_dir / f"{session_stem}.jsonl"
@@ -691,6 +692,7 @@ class TranslatorRuntime:
         try:
             try:
                 self._check_running()
+                await asyncio.to_thread(self.caption_manager.sweep)
                 if not self.caption_manager.reserve(job_id):
                     return JSONResponse(
                         {"error": "Caption capacity is full; retry after current jobs finish"},
@@ -717,14 +719,14 @@ class TranslatorRuntime:
         return JSONResponse({"job_id": job_id})
 
     async def captions_status(self, job_id: str):
-        self.caption_manager.sweep()
+        await asyncio.to_thread(self.caption_manager.sweep)
         job = self.caption_jobs.get(job_id)
         if not job:
             return JSONResponse({"error": "Job not found"}, status_code=404)
         return JSONResponse(job)
 
     async def captions_download(self, job_id: str, filename: str):
-        self.caption_manager.sweep()
+        await asyncio.to_thread(self.caption_manager.sweep)
         if job_id not in self.caption_jobs:
             return JSONResponse({"error": "Job not found"}, status_code=404)
         # Prevent path traversal
