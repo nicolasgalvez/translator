@@ -27,6 +27,7 @@ from audio_pipeline import (
     DropOldestQueue, UtteranceChunker,
 )
 from caption_jobs import CaptionJobManager
+from caption_translation import CaptionTranslationPolicy
 from language import LanguageOption
 from plugin_loader import load_plugins
 from transcript_events import process_transcript_text, queue_transcript_render_event
@@ -123,6 +124,7 @@ class TranslatorRuntime:
         self.templates = Jinja2Templates(directory="templates")
         self.caption_manager = CaptionJobManager(self)
         self.caption_jobs = self.caption_manager.jobs
+        self.caption_translation_policy = CaptionTranslationPolicy()
         self._backend_lock = threading.Lock()
         self._translation_lock = threading.Lock()
         self.clients: list[WebSocket] = []
@@ -493,7 +495,7 @@ class TranslatorRuntime:
 
         installed = argostranslate.package.get_installed_packages()
         installed_pairs = {(p.from_code, p.to_code) for p in installed}
-        needed = [("en", "es"), ("es", "en")]
+        needed = self.caption_translation_policy.routes
         missing = [pair for pair in needed if pair not in installed_pairs]
 
         if missing:
@@ -546,6 +548,7 @@ class TranslatorRuntime:
 
     def build_srt_entries(self, segments: list[dict], job: dict) -> tuple[list[dict], list[dict]]:
         """Return (as-spoken entries, translated entries), each segment flipped es<->en."""
+        self.caption_translation_policy.validate_segments(segments)
         with self._translation_lock:
             self._check_running()
             return self._build_srt_entries(segments, job)
@@ -563,12 +566,8 @@ class TranslatorRuntime:
                 "start": seg["start"], "end": seg["end"], "text": seg["text"],
             })
 
-            if seg["language"] == "es":
-                # Spanish segment → translate to English
-                text = argostranslate.translate.translate(seg["text"], "es", "en")
-            else:
-                # English (or other) segment → translate to Spanish
-                text = argostranslate.translate.translate(seg["text"], "en", "es")
+            source, target = self.caption_translation_policy.route_for(seg["language"])
+            text = argostranslate.translate.translate(seg["text"], source, target)
             translated_entries.append({
                 "start": seg["start"], "end": seg["end"], "text": text,
             })
@@ -641,6 +640,8 @@ class TranslatorRuntime:
             job.update(progress=50, message="Detecting language per segment...")
             self.label_segment_languages(segments, audio_array, detected_lang, job)
             self._check_running()
+
+            self.caption_translation_policy.validate_segments(segments)
 
             summary = self.language_summary(segments)
             job.update(progress=65, message=f"Found {summary} segments...")
