@@ -107,6 +107,29 @@ Frontend plugins register transcript filters and main-pane renderers through `fr
 
 Captures system audio in real time, transcribes Spanish with Whisper, saves transcript JSONL entries, and broadcasts transcript events to the React UI.
 
+Capture, chunking, and inference run in separate workers. Live audio buffering has
+fixed limits at 48 kHz mono float32:
+
+- Capture queue: 8 reads of 0.25 seconds (2 seconds, 384,000 bytes).
+  The capture worker also holds its current 0.25-second read and PCM conversion.
+- Chunker: 2 silent reads of pre-roll (0.5 seconds). During speech it retains
+  less than 5 seconds between reads, briefly less than 5.25 seconds before a cut.
+  It joins chunks only when emitting, with a temporary array under 1,008,000 bytes;
+  forced cuts also copy the emitted audio and the carried remainder.
+- Pending inference: 2 utterances, each at most 5 seconds (1,920,000 bytes total).
+  One additional utterance can be actively transcribing (960,000 bytes at 48 kHz,
+  plus its resampled 16 kHz input and backend working memory).
+
+Speech splits after two silent reads once at least 0.5 seconds is available. At
+5 seconds, the chunker cuts at the quietest 50 ms window in the last second and
+carries the remainder forward. Full queues discard the oldest pending item so
+the session catches up to current audio. This can omit words from live transcripts
+under sustained overload; the captured WAV is written before queueing and retains
+those captured samples. Runtime counters `audio_chunk_queue.dropped_count` and
+`utterance_queue.dropped_count` count items discarded by overload. Warnings identify the queue
+at the first drop and at cumulative counts 2, 4, 8, and so on. Shutdown discards
+pending audio and prevents late inference from publishing transcript output.
+
 The live-transcript WebSocket at `/ws` accepts browser connections whose Origin
 matches the request Host, normalizing hostname casing, IPv6 addresses, and default
 HTTP(S) ports. The trusted ASGI connection scheme determines the request origin

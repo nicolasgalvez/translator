@@ -21,6 +21,10 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
+from audio_pipeline import (
+    SAMPLE_RATE, CAPTURE_CHUNK, CAPTURE_QUEUE_CAPACITY, UTTERANCE_QUEUE_CAPACITY,
+    DropOldestQueue, UtteranceChunker,
+)
 from language import LanguageOption
 from plugin_loader import load_plugins
 from transcript_events import process_transcript_text, queue_transcript_render_event
@@ -31,13 +35,6 @@ if TYPE_CHECKING:
 
 # Audio and model dependencies are only needed when their work starts.
 # pylint: disable=import-outside-toplevel
-
-SAMPLE_RATE = 48000
-CAPTURE_CHUNK = 0.25
-SILENCE_THRESHOLD = 0.0005
-MAX_UTTERANCE = 5
-MIN_UTTERANCE = 0.5
-SILENCE_CHUNKS_TO_SPLIT = 2
 
 
 @dataclass(frozen=True)
@@ -112,7 +109,9 @@ class TranslatorRuntime:
         self.caption_jobs: dict[str, dict] = {}
         self.clients: list[WebSocket] = []
         self.text_queue: queue.Queue[dict] = queue.Queue()
-        self.audio_chunk_queue: queue.Queue[np.ndarray] = queue.Queue()
+        self.audio_chunk_queue = DropOldestQueue(CAPTURE_QUEUE_CAPACITY, "capture")
+        self.utterance_queue = DropOldestQueue(UTTERANCE_QUEUE_CAPACITY, "utterance")
+        self.audio_chunker = UtteranceChunker()
         self.wav_lock = threading.Lock()
         self._transcript_commit_lock = threading.Lock()
         self._stopping = threading.Event()
@@ -157,7 +156,8 @@ class TranslatorRuntime:
                 samplerate=SAMPLE_RATE, channels=1, dtype="float32", device=self.device_index,
             )
             self.audio_stream.start()
-            for target in (self.audio_capture_loop, self.audio_process_loop):
+            for target in (self.audio_capture_loop, self.audio_process_loop,
+                           self.audio_transcription_loop):
                 worker = threading.Thread(target=target, daemon=True)
                 worker.start()
                 self.worker_threads.append(worker)
@@ -169,6 +169,8 @@ class TranslatorRuntime:
     async def stop(self):
         """Signal workers and bound joins so an external inference cannot hang shutdown."""
         self._stopping.set()
+        self.audio_chunk_queue.close()
+        self.utterance_queue.close()
         errors = []
         with self._capture_cleanup_error(errors):
             await asyncio.to_thread(self._wait_for_transcript_commit)
@@ -243,32 +245,6 @@ class TranslatorRuntime:
                 return idx
         raise RuntimeError(f"Could not find '{name}' input device")
 
-    def is_silent(self, audio: np.ndarray) -> bool:
-        import numpy as np
-
-        return np.abs(audio).mean() < SILENCE_THRESHOLD
-
-    def find_quietest_cut(self, audio: np.ndarray, lookback_seconds: float = 1.0,
-                          window_seconds: float = 0.05) -> int:
-        """Return a sample index near the end of `audio` where amplitude is lowest.
-
-        Used when we hit MAX_UTTERANCE without natural silence — we cut at the
-        quietest spot in the last `lookback_seconds` instead of slicing mid-word.
-        """
-        import numpy as np
-
-        win = int(SAMPLE_RATE * window_seconds)
-        lookback = int(SAMPLE_RATE * lookback_seconds)
-        region = audio[-lookback:]
-        if len(region) < win * 2:
-            return len(audio)
-        # Mean amplitude in non-overlapping windows
-        n_windows = len(region) // win
-        trimmed = region[: n_windows * win].reshape(n_windows, win)
-        energies = np.abs(trimmed).mean(axis=1)
-        quietest = int(np.argmin(energies))
-        return len(audio) - lookback + quietest * win + win  # cut at end of quietest window
-
     def load_audio_16k(self, path: Path) -> np.ndarray:
         """Load mono 16kHz float32 audio extracted by the captions pipeline."""
         import numpy as np
@@ -308,55 +284,40 @@ class TranslatorRuntime:
                     print(f"Audio capture error: {exc}", flush=True)
 
     def audio_process_loop(self):
-        """Accumulate audio and transcribe on natural pauses or max duration."""
-        import numpy as np
-
+        """Split capture promptly even while the backend is still transcribing."""
         print("Audio processing started (silence-based splitting)", flush=True)
-        utterance_buf = np.zeros(0, dtype=np.float32)
-        silent_count = 0
-        has_speech = False
+        try:
+            while not self._stopping.is_set():
+                try:
+                    chunk = self.audio_chunk_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                try:
+                    if not self._stopping.is_set():
+                        audio = self.audio_chunker.add(chunk)
+                        if audio is not None:
+                            self.utterance_queue.put(audio)
+                        del audio
+                finally:
+                    self.audio_chunk_queue.task_done()
+                    del chunk
+        finally:
+            self.audio_chunker.reset()
 
+    def audio_transcription_loop(self):
+        """Consume a bounded backlog without holding up capture or chunking."""
         while not self._stopping.is_set():
             try:
-                chunk = self.audio_chunk_queue.get(timeout=0.1)
+                audio = self.utterance_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
-            utterance_buf = np.concatenate([utterance_buf, chunk])
-            duration = len(utterance_buf) / SAMPLE_RATE
-
-            if self.is_silent(chunk):
-                silent_count += 1
-            else:
-                silent_count = 0
-                has_speech = True
-
-            natural_break = (
-                has_speech and silent_count >= SILENCE_CHUNKS_TO_SPLIT and duration >= MIN_UTTERANCE
-            )
-            forced_break = has_speech and duration >= MAX_UTTERANCE
-
-            if not (natural_break or forced_break):
-                continue
-
-            if forced_break and not natural_break:
-                # No silence found — find the quietest spot in the last ~1s and cut there
-                # so we don't slice mid-word. The trailing audio carries forward.
-                cut = self.find_quietest_cut(utterance_buf, lookback_seconds=1.0)
-                audio = utterance_buf[:cut].copy()
-                utterance_buf = utterance_buf[cut:].copy()
-                # Don't reset has_speech — there's still speech in the carried tail
-                silent_count = 0
-            else:
-                audio = utterance_buf.copy()
-                utterance_buf = np.zeros(0, dtype=np.float32)
-                silent_count = 0
-                has_speech = False
-
             try:
                 self._transcribe_audio(audio)
-            # One bad utterance must not end the processing thread.
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                print(f"Transcription error: {e}", flush=True)
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                print(f"Transcription error: {exc}", flush=True)
+            finally:
+                self.utterance_queue.task_done()
+                del audio
 
     def _transcribe_audio(self, audio: np.ndarray):
         import numpy as np
