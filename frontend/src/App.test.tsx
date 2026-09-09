@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react"
+import { act, cleanup, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import App from "@/App"
@@ -25,6 +25,7 @@ describe("App", () => {
   })
 
   afterEach(() => {
+    cleanup()
     vi.unstubAllGlobals()
   })
 
@@ -78,6 +79,27 @@ describe("App", () => {
     expect(articles[0]).toHaveTextContent("message 2")
     expect(articles.at(-1)).toHaveTextContent("message 501")
     expect(screen.queryByText("message 1")).not.toBeInTheDocument()
+    expect(screen.getByText("connected")).toBeInTheDocument()
+  })
+
+  it("shows recording failure while live transcription stays connected", () => {
+    render(<App />)
+    const socket = MockWebSocket.instances[0]
+
+    act(() => socket.onopen?.())
+    act(() => {
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: "status",
+          status: "recording-error",
+          message: "Recording stopped; live transcription continues.",
+        }),
+      } as MessageEvent)
+    })
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Recording stopped; live transcription continues.",
+    )
     expect(screen.getByText("connected")).toBeInTheDocument()
   })
 })

@@ -1,5 +1,8 @@
 """Bounded transcript history storage and route behavior."""
 
+# History's unit and route regressions intentionally share production-shaped fixtures.
+# pylint: disable=too-many-lines
+
 import asyncio
 from io import BytesIO
 import importlib
@@ -431,6 +434,104 @@ def test_history_reader_streams_and_retains_only_recent_entries(tmp_path, monkey
     assert detail["label"] == "September 03, 2026 at 12:00 PM"
     assert detail["has_audio"] is True
     assert detail["audio_url"] == "/audio/2026-09-03_120000.wav"
+
+
+def test_history_reader_orders_only_contiguous_safe_audio_parts(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    stem = "2026-09-03_120000"
+    session = tmp_path / f"{stem}.jsonl"
+    write_session(session, ["recorded"])
+    for filename in (
+        f"{stem}.part010.wav", f"{stem}.part003.wav",
+        f"{stem}.wav", f"{stem}.part002.wav", f"{stem}.part02.wav",
+    ):
+        (tmp_path / filename).write_bytes(b"audio")
+
+    detail = module.TranscriptHistoryReader(
+        tmp_path, session_limit=2, entry_limit=2,
+    ).read_session(session.name)
+
+    assert detail["audio_urls"] == [
+        f"/audio/{stem}.wav",
+        f"/audio/{stem}.part002.wav",
+        f"/audio/{stem}.part003.wav",
+    ]
+    assert detail["has_audio"] is True
+    assert detail["audio_url"] is None
+
+
+def test_history_reader_stops_before_a_symlinked_or_missing_audio_part(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    stem = "2026-09-03_120000"
+    session = tmp_path / f"{stem}.jsonl"
+    write_session(session, ["recorded"])
+    (tmp_path / f"{stem}.wav").write_bytes(b"first")
+    outside = tmp_path / "outside.wav"
+    outside.write_bytes(b"private audio")
+    (tmp_path / f"{stem}.part002.wav").symlink_to(outside)
+    (tmp_path / f"{stem}.part003.wav").write_bytes(b"third")
+    reader = module.TranscriptHistoryReader(tmp_path, session_limit=2, entry_limit=2)
+
+    detail = reader.read_session(session.name)
+
+    assert detail["audio_urls"] == [f"/audio/{stem}.wav"]
+    assert reader.audio_file("../outside.wav") is None
+    assert outside.read_bytes() == b"private audio"
+
+
+def test_history_reader_ignores_unicode_numeric_audio_part_names(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    stem = "2026-09-03_120000"
+    session = tmp_path / f"{stem}.jsonl"
+    write_session(session, ["recorded"])
+    (tmp_path / f"{stem}.wav").write_bytes(b"first")
+    for number_text in ("00²", "００２", "٠٠٢"):
+        (tmp_path / f"{stem}.part{number_text}.wav").write_bytes(b"not a part")
+
+    detail = module.TranscriptHistoryReader(
+        tmp_path, session_limit=2, entry_limit=2,
+    ).read_session(session.name)
+
+    assert detail["audio_urls"] == [f"/audio/{stem}.wav"]
+
+
+def test_history_page_uses_one_player_per_recording_part(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    application = importlib.import_module("app")
+    transcripts = tmp_path / "transcripts"
+    transcripts.mkdir()
+    single_stem = "2026-09-02_120000"
+    multi_stem = "2026-09-03_120000"
+    for stem in (single_stem, multi_stem):
+        write_session(transcripts / f"{stem}.jsonl", ["recorded"])
+        (transcripts / f"{stem}.wav").write_bytes(b"audio")
+    (transcripts / f"{multi_stem}.part002.wav").write_bytes(b"audio")
+
+    class Runtime(module.TranslatorRuntime):  # pylint: disable=too-few-public-methods
+        async def start(self):
+            return None
+
+    runtime = Runtime(module.RuntimeConfig.from_environment({}))
+    runtime.transcripts_dir = transcripts
+
+    async def exercise():
+        app = application.create_app(lambda: runtime)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                single = await client.get(f"/history/{single_stem}.jsonl")
+                multi = await client.get(f"/history/{multi_stem}.jsonl")
+                return single, multi
+
+    single, multi = asyncio.run(exercise())
+    assert single.status_code == 200
+    assert single.text.count("<audio ") == 1
+    assert "Recording part 1" not in single.text
+    assert multi.status_code == 200
+    assert multi.text.count("<audio ") == 2
+    assert "Recording part 1" in multi.text
+    assert "Recording part 2" in multi.text
 
 
 def test_history_detail_skips_corruption_and_preserves_valid_entry_order(tmp_path):

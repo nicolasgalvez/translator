@@ -147,6 +147,6 @@ def test_invalid_default_startup_fails_before_creating_resources(tmp_path, monke
     with pytest.raises(RuntimeError, match="default input.*Available input devices"):
         asyncio.run(runtime.start())
     assert runtime.audio_stream is None
-    assert runtime.wav_writer is None
+    assert runtime.audio_recorder is None
     assert runtime.worker_threads == []
     assert not list(tmp_path.iterdir())

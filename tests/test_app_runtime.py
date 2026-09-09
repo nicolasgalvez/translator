@@ -53,6 +53,31 @@ def write_wav(path, *, sample_rate=16000, channels=1, sample_width=2, frames=b"\
         wav_file.writeframes(frames)
 
 
+def require_marker_before_recorder_open(module, monkeypatch):
+    """Require runtime startup to claim the recording stem before opening WAV."""
+    recorder_open = module.RotatingWavRecorder.open
+
+    def open_after_marker(recorder):
+        marker = recorder.directory / f"{recorder.session_stem}.jsonl"
+        assert marker.is_file()
+        recorder_open(recorder)
+
+    monkeypatch.setattr(module.RotatingWavRecorder, "open", open_after_marker)
+
+
+def test_fallback_live_page_keeps_a_recording_failure_alert_visible():
+    template = (
+        Path(__file__).resolve().parents[1] / "templates" / "index.html"
+    ).read_text(encoding="utf-8")
+
+    assert 'id="recording-alert"' in template
+    assert 'role="alert"' in template
+    assert "data.type === 'status'" in template
+    assert "data.status === 'recording-error'" in template
+    assert "recordingAlert.textContent = data.message" in template
+    assert "recordingAlert.hidden = false" in template
+
+
 def test_load_audio_rejects_wrong_sample_rate(tmp_path):
     module = importlib.import_module("translator_runtime")
     path = tmp_path / "wrong-rate.wav"
@@ -1522,12 +1547,12 @@ def test_audio_capture_read_failure_is_terminal_without_output(tmp_path, capsys)
 
     runtime.audio_stream = FailedStream()
     audio_file = tmp_path / "capture.wav"
-    with wave.Wave_write(str(audio_file)) as writer:
-        writer.setnchannels(1)
-        writer.setsampwidth(2)
-        writer.setframerate(48000)
-        runtime.wav_writer = writer
-        runtime.audio_capture_loop()
+    runtime.audio_recorder = module.RotatingWavRecorder(
+        tmp_path, "capture", storage_budget_bytes=1024,
+    )
+    runtime.audio_recorder.open()
+    runtime.audio_capture_loop()
+    runtime.audio_recorder.close()
 
     assert runtime.audio_stream.reads == 1
     assert not runtime._stopping.is_set()  # pylint: disable=protected-access
@@ -1537,7 +1562,44 @@ def test_audio_capture_read_failure_is_terminal_without_output(tmp_path, capsys)
         assert recording.getnframes() == 0
 
 
-def test_audio_capture_write_failure_is_terminal_without_queueing(capsys):
+def test_audio_capture_recording_failure_reports_once_and_keeps_queueing(tmp_path, capsys):
+    module = importlib.import_module("translator_runtime")
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+
+    class Stream:  # pylint: disable=too-few-public-methods
+        reads = 0
+
+        def read(self, frames):
+            self.reads += 1
+            if self.reads > 2:
+                raise OSError("input disconnected")
+            return np.zeros((frames, 1), dtype="float32"), False
+
+    runtime.audio_stream = Stream()
+    runtime.audio_recorder = module.RotatingWavRecorder(
+        tmp_path, "2026-09-09_120000", storage_budget_bytes=1,
+    )
+    runtime.audio_capture_loop()
+
+    assert runtime.audio_stream.reads == 3
+    assert not runtime._stopping.is_set()  # pylint: disable=protected-access
+    assert runtime.audio_chunk_queue.qsize() == 2
+    status = runtime.text_queue.get_nowait()
+    assert status == {
+        "type": "status",
+        "status": "recording-error",
+        "message": "Recording stopped; live transcription continues.",
+    }
+    assert runtime.text_queue.empty()
+    assert runtime.audio_recorder.enabled is False
+    output = capsys.readouterr().out
+    assert output.count("Recording disabled: Recording storage budget exhausted") == 1
+    assert output.count("Audio capture error: input disconnected") == 1
+
+
+def test_audio_capture_wave_write_failure_keeps_the_chunk_for_transcription(
+    tmp_path, monkeypatch,
+):
     module = importlib.import_module("translator_runtime")
     runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
 
@@ -1547,25 +1609,28 @@ def test_audio_capture_write_failure_is_terminal_without_queueing(capsys):
         def read(self, frames):
             self.reads += 1
             if self.reads > 1:
-                runtime._stopping.set()  # pylint: disable=protected-access
-            return np.zeros((frames, 1), dtype="float32"), False
-
-    class FailedWriter:  # pylint: disable=too-few-public-methods
-        writes = 0
-
-        def writeframes(self, _frames):
-            self.writes += 1
-            raise OSError("recording unavailable")
+                raise OSError("input disconnected")
+            return np.full((frames, 1), 0.25, dtype="float32"), False
 
     runtime.audio_stream = Stream()
-    runtime.wav_writer = FailedWriter()
+    runtime.audio_recorder = module.RotatingWavRecorder(
+        tmp_path, "2026-09-09_120000", storage_budget_bytes=1_000_000,
+    )
+    runtime.audio_recorder.open()
+    writer = runtime.audio_recorder._writer  # pylint: disable=protected-access
+
+    def fail_write(_pcm):
+        raise OSError("disk write failed")
+
+    monkeypatch.setattr(writer, "writeframes", fail_write)
+
     runtime.audio_capture_loop()
 
-    assert runtime.audio_stream.reads == 1
-    assert runtime.wav_writer.writes == 1
-    assert not runtime._stopping.is_set()  # pylint: disable=protected-access
+    captured = runtime.audio_chunk_queue.get_nowait()
+    assert np.all(captured == 0.25)
     assert runtime.audio_chunk_queue.empty()
-    assert capsys.readouterr().out.count("Audio capture error: recording unavailable") == 1
+    assert runtime.text_queue.get_nowait()["status"] == "recording-error"
+    assert runtime.audio_recorder.enabled is False
 
 
 def test_audio_capture_overload_keeps_recent_chunks_and_reports_drops(tmp_path, caplog):
@@ -1583,12 +1648,12 @@ def test_audio_capture_overload_keeps_recent_chunks_and_reports_drops(tmp_path, 
 
     runtime.audio_stream = Stream()
     runtime.audio_file = tmp_path / "capture.wav"
-    with wave.Wave_write(str(runtime.audio_file)) as writer:
-        writer.setnchannels(1)
-        writer.setsampwidth(2)
-        writer.setframerate(48000)
-        runtime.wav_writer = writer
-        runtime.audio_capture_loop()
+    runtime.audio_recorder = module.RotatingWavRecorder(
+        tmp_path, "capture", storage_budget_bytes=10_000_000,
+    )
+    runtime.audio_recorder.open()
+    runtime.audio_capture_loop()
+    runtime.audio_recorder.close()
     assert runtime.audio_chunk_queue.qsize() <= 8
     chunks = []
     while not runtime.audio_chunk_queue.empty():
@@ -2640,6 +2705,90 @@ def test_websocket_disconnect_after_shutdown_is_clean():
     asyncio.run(exercise())
 
 
+def test_websocket_client_connecting_after_recording_failure_receives_status():
+    module = importlib.import_module("translator_runtime")
+
+    async def exercise():
+        runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+        runtime._publish_recording_error(OSError("disk unavailable"))  # pylint: disable=protected-access
+        broadcaster = asyncio.create_task(runtime.broadcast_loop())
+        await asyncio.wait_for(asyncio.to_thread(runtime.text_queue.join), 1)
+        broadcaster.cancel()
+        with suppress(asyncio.CancelledError):
+            await broadcaster
+        messages = []
+        delivered = asyncio.Event()
+        connection_received = False
+
+        async def receive():
+            nonlocal connection_received
+            if not connection_received:
+                connection_received = True
+                return {"type": "websocket.connect"}
+            await delivered.wait()
+            return {"type": "websocket.disconnect", "code": 1000}
+
+        async def send(message):
+            messages.append(message)
+            if message["type"] == "websocket.send":
+                delivered.set()
+
+        websocket = module.WebSocket({"type": "websocket"}, receive, send)
+        await asyncio.wait_for(runtime.websocket_endpoint(websocket), 1)
+        assert json.loads(messages[1]["text"]) == {
+            "type": "status", "status": "recording-error",
+            "message": "Recording stopped; live transcription continues.",
+        }
+        await runtime.stop()
+
+    asyncio.run(exercise())
+
+
+def test_recording_status_is_not_duplicated_when_client_connects_before_broadcast():
+    module = importlib.import_module("translator_runtime")
+
+    async def exercise():
+        runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+        runtime._publish_recording_error(OSError("disk unavailable"))  # pylint: disable=protected-access
+        delivered = []
+        accepted = asyncio.Event()
+        release = asyncio.Event()
+        connection_received = False
+
+        async def receive():
+            nonlocal connection_received
+            if not connection_received:
+                connection_received = True
+                return {"type": "websocket.connect"}
+            await release.wait()
+            return {"type": "websocket.disconnect", "code": 1000}
+
+        async def send(message):
+            if message["type"] == "websocket.accept":
+                accepted.set()
+            elif message["type"] == "websocket.send":
+                delivered.append(json.loads(message["text"]))
+
+        websocket = module.WebSocket({"type": "websocket"}, receive, send)
+        endpoint = asyncio.create_task(runtime.websocket_endpoint(websocket))
+        await accepted.wait()
+        broadcaster = asyncio.create_task(runtime.broadcast_loop())
+        await asyncio.wait_for(asyncio.to_thread(runtime.text_queue.join), 1)
+        await asyncio.sleep(0.05)
+        assert delivered == [{
+            "type": "status", "status": "recording-error",
+            "message": "Recording stopped; live transcription continues.",
+        }]
+        release.set()
+        await endpoint
+        broadcaster.cancel()
+        with suppress(asyncio.CancelledError):
+            await broadcaster
+        await runtime.stop()
+
+    asyncio.run(exercise())
+
+
 def test_caption_worker_stops_after_inflight_backend_returns(tmp_path):
     module = importlib.import_module("translator_runtime")
     entered = threading.Event()
@@ -2781,6 +2930,7 @@ def test_runtime_shutdown_closes_owned_resources(
         get_backend=lambda *_args: Backend(),
     ))
     monkeypatch.setattr(module, "load_plugins", lambda: [])
+    require_marker_before_recorder_open(module, monkeypatch)
 
     async def exercise():
         environment = {} if device_setting is None else {"TRANSLATOR_DEVICE": device_setting}
@@ -2807,8 +2957,8 @@ def test_runtime_shutdown_closes_owned_resources(
         assert all(not thread.is_alive() for thread in runtime.worker_threads)
         assert runtime.broadcast_task.done()
         assert stream_closed.is_set()
-        assert runtime.clients == []
-        assert runtime.backend is None
+        assert (runtime.clients, runtime.backend) == ([], None)
+        assert runtime.transcript_file.read_bytes() == b""
         with wave.open(str(runtime.audio_file), "rb") as audio:
             assert (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) == (
                 1, 2, 48000,
@@ -2836,7 +2986,9 @@ class FailingAudioStream:
 
 
 @pytest.mark.parametrize("failure", ["caption_thread_start", "wav_close", "abort_and_wav_close"])
-def test_cleanup_continues_after_a_resource_failure(tmp_path, monkeypatch, failure):
+def test_cleanup_continues_after_a_resource_failure(  # pylint: disable=too-many-statements
+    tmp_path, monkeypatch, failure,
+):
     module = importlib.import_module("translator_runtime")
     first_error = OSError(
         "abort failed" if failure == "abort_and_wav_close" else "WAV close failed",
@@ -2847,19 +2999,20 @@ def test_cleanup_continues_after_a_resource_failure(tmp_path, monkeypatch, failu
         runtime.backend = object()
         runtime.captions_dir = tmp_path / "captions"
         runtime.audio_file = tmp_path / "session.wav"
-        runtime.wav_writer = wave.Wave_write(str(runtime.audio_file))
-        runtime.wav_writer.setnchannels(1)
-        runtime.wav_writer.setsampwidth(2)
-        runtime.wav_writer.setframerate(48000)
+        runtime.audio_recorder = module.RotatingWavRecorder(
+            tmp_path, "session", storage_budget_bytes=1024,
+        )
+        runtime.audio_recorder.open()
         stream = FailingAudioStream(first_error if failure == "abort_and_wav_close" else None)
         runtime.audio_stream = stream
         runtime.broadcast_task = asyncio.create_task(runtime.broadcast_loop())
+        delivered = []
 
         async def receive():
             return {"type": "websocket.connect"}
 
-        async def send(_message):
-            pass
+        async def send(message):
+            delivered.append(message)
 
         client = module.WebSocket({"type": "websocket"}, receive, send)
         await client.accept()
@@ -2879,7 +3032,8 @@ def test_cleanup_continues_after_a_resource_failure(tmp_path, monkeypatch, failu
             await runtime.stop()
             assert not runtime.worker_threads
         else:
-            original_close = runtime.wav_writer.close
+            writer = runtime.audio_recorder._writer  # pylint: disable=protected-access
+            original_close = writer.close
 
             def fail_wav_close():
                 original_close()
@@ -2887,19 +3041,28 @@ def test_cleanup_continues_after_a_resource_failure(tmp_path, monkeypatch, failu
                     raise first_error
                 raise OSError("later WAV close failure")
 
-            monkeypatch.setattr(runtime.wav_writer, "close", fail_wav_close)
+            monkeypatch.setattr(writer, "close", fail_wav_close)
             with pytest.raises(OSError) as caught:
                 await runtime.stop()
             assert caught.value is first_error
 
         assert stream.aborted and stream.closed
         assert runtime.audio_stream is None
-        assert runtime.wav_writer is None
+        assert runtime.audio_recorder is None
         assert runtime.backend is None
         assert runtime.broadcast_task.done()
         assert not runtime.clients
         assert client.application_state is WebSocketState.DISCONNECTED
         with wave.open(str(runtime.audio_file), "rb") as audio:
             assert audio.getframerate() == 48000
+        if failure != "caption_thread_start":
+            status_messages = [
+                json.loads(message["text"]) for message in delivered
+                if message["type"] == "websocket.send"
+            ]
+            assert status_messages == [{
+                "type": "status", "status": "recording-error",
+                "message": "Recording stopped; live transcription continues.",
+            }]
 
     asyncio.run(exercise())

@@ -36,6 +36,7 @@ class RuntimeConfig:  # pylint: disable=too-many-instance-attributes
     history_session_limit: int = 50
     history_entry_limit: int = 500
     websocket_queue_capacity: int = 32
+    recording_storage_bytes: int = 8 * 1024 * 1024 * 1024
 
     @classmethod
     def from_environment(cls, environ):
@@ -92,4 +93,7 @@ class RuntimeConfig:  # pylint: disable=too-many-instance-attributes
         return cls(values["HOST"], port, values["MODEL"], values["DEVICE"],
                    values["BACKEND"], LanguageOption.from_env(environ), max_upload_bytes,
                    allowed_origins, *caption_settings, *history_settings,
-                   websocket_queue_capacity)
+                   websocket_queue_capacity, _positive_integer_setting(
+                       environ, "TRANSLATOR_RECORDING_STORAGE_BYTES",
+                       str(8 * 1024 * 1024 * 1024),
+                   ))

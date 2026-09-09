@@ -31,6 +31,13 @@
             color: #aab2bf;
         }
         .status.connected { color: #5fc4b8; }
+        .recording-alert {
+            padding: 0.6rem 1rem;
+            border-bottom: 1px solid #b94a48;
+            background: #3a2024;
+            color: #ffb4ab;
+            font-size: 0.85rem;
+        }
         .spacer { flex: 1; }
         a.nav-link {
             color: #aab2bf;
@@ -101,6 +108,7 @@
         <div class="spacer"></div>
         <a class="nav-link" href="/history">History</a>
     </header>
+    <div class="recording-alert" id="recording-alert" role="alert" hidden></div>
     <div class="layout">
         <aside class="transcript">
             <div class="panel-header">Live Transcript</div>
@@ -119,6 +127,7 @@
     <script>
         const panel = document.getElementById('transcript-panel');
         const status = document.getElementById('status');
+        const recordingAlert = document.getElementById('recording-alert');
 
         function addEntry(event) {
             const empty = document.getElementById('empty');
@@ -155,6 +164,11 @@
             };
             ws.onmessage = (message) => {
                 const data = JSON.parse(message.data);
+                if (data.type === 'status' && data.status === 'recording-error') {
+                    recordingAlert.textContent = data.message;
+                    recordingAlert.hidden = false;
+                    return;
+                }
                 if (data.type === 'transcript') addEntry(data.event);
             };
         }

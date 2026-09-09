@@ -8,6 +8,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 
 LOGGER = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ class TranscriptHistoryReader:
     # Covers more than 1,000 typical 64 KiB records and twice the worst-case
     # bytes needed to count the default 500-entry view plus one.
     _MAX_LIST_BYTES = 64 * 1024 * 1024
+    _AUDIO_PART_NUMBER = re.compile(r"[0-9]{3,}")
 
     def __init__(self, directory: Path, session_limit: int, entry_limit: int):
         self.directory = directory
@@ -84,7 +86,7 @@ class TranscriptHistoryReader:
         )
         self._warn_corruption(requested_path.name, skipped_records, "reading history")
         stem = requested_path.stem
-        has_audio = self.audio_file(f"{stem}.wav") is not None
+        audio_urls = self._audio_urls(stem)
         return {
             "label": self._label(stem),
             "entries": list(entries),
@@ -92,8 +94,9 @@ class TranscriptHistoryReader:
             "scan_truncated": scan_truncated,
             "skipped_records": skipped_records,
             "entry_limit": self.entry_limit,
-            "has_audio": has_audio,
-            "audio_url": f"/audio/{stem}.wav" if has_audio else None,
+            "has_audio": bool(audio_urls),
+            "audio_url": audio_urls[0] if len(audio_urls) == 1 else None,
+            "audio_urls": audio_urls,
         }
 
     def audio_file(self, filename: str) -> Path | None:
@@ -103,6 +106,31 @@ class TranscriptHistoryReader:
                 or requested_path.is_symlink()):
             return None
         return self._resolved_file(self.directory.resolve(), requested_path)
+
+    def _audio_urls(self, stem: str) -> list[str]:
+        base_name = f"{stem}.wav"
+        if self.audio_file(base_name) is None:
+            return []
+        parts = [(1, base_name)]
+        prefix = f"{stem}.part"
+        for path in self.directory.iterdir():
+            name = path.name
+            if not name.startswith(prefix) or not name.endswith(".wav"):
+                continue
+            number_text = name[len(prefix):-4]
+            if self._AUDIO_PART_NUMBER.fullmatch(number_text) is None:
+                continue
+            number = int(number_text)
+            if number < 2 or number_text != f"{number:03d}":
+                continue
+            if self.audio_file(name) is not None:
+                parts.append((number, name))
+        urls = []
+        for expected, (number, name) in enumerate(sorted(parts), start=1):
+            if number != expected:
+                break
+            urls.append(f"/audio/{name}")
+        return urls
 
     def _count_entries(self, path: Path) -> tuple[int, bool, bool, int]:
         count = 0
