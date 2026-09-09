@@ -58,6 +58,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [ -f "$SCRIPT_DIR/frontend/package.json" ]; then
+    if ! command -v node >/dev/null 2>&1; then
+        echo "Node.js is required but was not found. Install Node.js 22.12 through 22.x, 24.x, or 26+ (supported range: ^22.12.0 || ^24.0.0 || >=26.0.0), then try again." >&2
+        exit 1
+    fi
+    node "$SCRIPT_DIR/frontend/scripts/node-version-policy.js"
+fi
+
 # uv creates and syncs .venv from uv.lock on demand, so there is no first-run
 # branch, no manual activation, and no "is mlx_whisper importable yet" probe —
 # switching backends just changes which extra is synced.
