@@ -10,6 +10,7 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
+import queue
 import subprocess
 import sys
 import threading
@@ -41,6 +42,417 @@ def wait_until(predicate):
     while not predicate() and time.monotonic() < deadline:
         time.sleep(0.005)
     assert predicate()
+
+
+@pytest.mark.parametrize("setting", ["CONCURRENCY", "QUEUE_CAPACITY", "RETENTION_SECONDS"])
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", "bad", ""])
+def test_caption_lifecycle_configuration_rejects_invalid_values(setting, value):
+    module = importlib.import_module("translator_runtime")
+    with pytest.raises(ValueError, match=f"TRANSLATOR_CAPTION_{setting}"):
+        module.RuntimeConfig.from_environment({f"TRANSLATOR_CAPTION_{setting}": value})
+
+
+def test_caption_capacity_keeps_fixed_workers_and_fifo_without_rejected_artifacts(upload_runtime):
+    runtime, entered, inputs = upload_runtime
+    module = importlib.import_module("translator_runtime")
+
+    async def exercise():
+        responses = []
+        for index in range(4):
+            upload = module.UploadFile(BytesIO(str(index).encode()), filename="video.mp4")
+            responses.append(await runtime.captions_upload(upload))
+            assert upload.file.closed
+        assert entered.wait(2)
+        assert [response.status_code for response in responses] == [200, 200, 200, 429]
+        assert int(responses[-1].headers["Retry-After"]) > 0
+        assert len(runtime.caption_jobs) == 3
+        assert len(list(runtime.captions_dir.iterdir())) == 3
+        assert len(inputs) == 1
+        assert sum(worker.name.startswith("caption-worker-") for worker in
+                   runtime.worker_threads) == 1
+        ids = [json.loads(response.body)["job_id"] for response in responses[:3]]
+        assert [runtime.caption_jobs[job_id]["status"] for job_id in ids] == [
+            "processing", "queued", "queued",
+        ]
+        return ids
+
+    ids = asyncio.run(exercise())
+    # Shutdown cancels queued work immediately, while the active extraction is bounded.
+    asyncio.run(runtime.stop())
+    assert [runtime.caption_jobs[job_id]["status"] for job_id in ids[1:]] == ["error", "error"]
+    assert all("completed_at" in runtime.caption_jobs[job_id] for job_id in ids[1:])
+
+
+def test_caption_terminal_retention_removes_records_downloads_and_recursive_artifacts(
+    tmp_path, monkeypatch,
+):
+    module = importlib.import_module("translator_runtime")
+    now = [1000.0]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+
+    class FailedRuntime(module.TranslatorRuntime):  # pylint: disable=too-few-public-methods
+        def extract_audio_16k(self, _video_path, audio_path):
+            audio_path.write_bytes(b"partial audio")
+            (audio_path.parent / "leftovers").mkdir()
+            (audio_path.parent / "leftovers" / "partial").write_bytes(b"partial")
+            return "invalid video"
+
+    runtime = FailedRuntime(module.RuntimeConfig.from_environment({
+        "TRANSLATOR_CAPTION_RETENTION_SECONDS": "10",
+    }))
+    runtime.captions_dir = tmp_path / "captions"
+    try:
+        response = asyncio.run(runtime.captions_upload(
+            module.UploadFile(BytesIO(b"video"), filename="video.mp4"),
+        ))
+        job_id = json.loads(response.body)["job_id"]
+        wait_until(lambda: runtime.caption_jobs[job_id]["status"] == "error")
+        assert runtime.caption_jobs[job_id].get("completed_at") == 1000.0
+        now[0] = 1009
+        assert asyncio.run(runtime.captions_status(job_id)).status_code == 200
+        now[0] = 1010
+        assert asyncio.run(runtime.captions_download(job_id, "audio.wav")).status_code == 404
+        assert asyncio.run(runtime.captions_status(job_id)).status_code == 404
+        assert not (runtime.captions_dir / job_id).exists()
+    finally:
+        asyncio.run(runtime.stop())
+
+
+def test_caption_sweep_removes_only_old_generated_orphans(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({
+        "TRANSLATOR_CAPTION_RETENTION_SECONDS": "10",
+    }))
+    runtime.captions_dir = tmp_path / "captions"
+    runtime.captions_dir.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_text("safe")
+    for name in ("0123456789ab", "abcdefabcdef", "non-job-directory", "111111111111"):
+        directory = runtime.captions_dir / name
+        directory.mkdir()
+        (directory / "leftover").write_text("data")
+        os.utime(directory, (1, 1))
+    os.utime(runtime.captions_dir / "abcdefabcdef", None)
+    runtime.caption_jobs["111111111111"] = {"status": "queued"}
+    (runtime.captions_dir / "222222222222").symlink_to(outside, target_is_directory=True)
+    asyncio.run(runtime.captions_status("missing"))
+    assert not (runtime.captions_dir / "0123456789ab").exists()
+    for name in ("abcdefabcdef", "non-job-directory", "111111111111", "222222222222"):
+        assert (runtime.captions_dir / name).exists()
+    assert (outside / "keep").read_text() == "safe"
+
+
+def test_caption_and_live_backend_calls_are_serialized_including_lazy_segments(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    active = 0
+    maximum = 0
+    lock = threading.Lock()
+
+    class Backend:  # pylint: disable=too-few-public-methods
+        name = "tracked"
+
+        def transcribe(self, *_args, **_kwargs):
+            def segments():
+                nonlocal active, maximum
+                with lock:
+                    active += 1
+                    maximum = max(maximum, active)
+                time.sleep(0.05)
+                yield SimpleNamespace(start=0, end=1, text="speech")
+                with lock:
+                    active -= 1
+            return segments(), "en"
+
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+    runtime.backend = Backend()
+    runtime.transcript_file = tmp_path / "session.jsonl"
+    workers = [threading.Thread(target=runtime.transcribe_segments,
+                               args=(np.zeros(16000), {})) for _ in range(3)]
+    workers.append(threading.Thread(target=runtime._transcribe_audio,  # pylint: disable=protected-access
+                                    args=(np.zeros(48000),)))
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(2)
+        assert not worker.is_alive()
+    assert maximum == 1
+
+
+def test_caption_upload_reservations_count_toward_capacity_and_cancel_cleanly(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({
+        "TRANSLATOR_CAPTION_CONCURRENCY": "1", "TRANSLATOR_CAPTION_QUEUE_CAPACITY": "1",
+    }))
+    runtime.captions_dir = tmp_path / "captions"
+
+    async def exercise():
+        entered = asyncio.Queue()
+        hold = asyncio.Event()
+
+        class SlowUpload(module.UploadFile):  # pylint: disable=too-few-public-methods
+            async def read(self, size=-1):
+                await entered.put(True)
+                await hold.wait()
+                return await super().read(size)
+
+        uploads = [SlowUpload(BytesIO(b"video"), filename="video.mp4") for _ in range(2)]
+        tasks = [asyncio.create_task(runtime.captions_upload(upload)) for upload in uploads]
+        try:
+            await asyncio.wait_for(entered.get(), 2)
+            await asyncio.wait_for(entered.get(), 2)
+            rejected = module.UploadFile(BytesIO(b"excess"), filename="video.mp4")
+            response = await runtime.captions_upload(rejected)
+            assert response.status_code == 429
+            assert rejected.file.closed
+            assert len(list(runtime.captions_dir.iterdir())) == 2
+            assert runtime.caption_jobs == {}
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            assert all(upload.file.closed for upload in uploads)
+            assert not list(runtime.captions_dir.iterdir())
+        # Failed uploads relinquish both slots; stopping also prevents submission.
+        assert runtime.caption_manager.reserve("0123456789ab")
+        assert runtime.caption_manager.reserve("abcdefabcdef")
+        await runtime.stop()
+        with pytest.raises(RuntimeError, match="stopped"):
+            runtime.caption_manager.submit("0123456789ab", tmp_path / "video", "video")
+
+    asyncio.run(exercise())
+
+
+def test_caption_workers_finish_fifo_and_expire_success_artifacts(tmp_path, monkeypatch):
+    # pylint: disable=too-many-locals
+    module = importlib.import_module("translator_runtime")
+    release, entered = threading.Event(), threading.Event()
+    order = []
+
+    class CaptionRuntime(module.TranslatorRuntime):  # pylint: disable=too-few-public-methods
+        def extract_audio_16k(self, video_path, audio_path):
+            order.append(video_path.read_bytes())
+            entered.set()
+            assert release.wait(5)
+            with wave.Wave_write(str(audio_path)) as audio:
+                audio.setnchannels(1)
+                audio.setsampwidth(2)
+                audio.setframerate(16000)
+                audio.writeframes(b"\0\0" * 16000)
+
+    class Backend:
+        def transcribe(self, *_args, **_kwargs):
+            return [SimpleNamespace(start=0, end=1, text="Hello")], "en"
+
+        def detect_language(self, _audio):
+            return "en", 1
+
+    packages = SimpleNamespace(get_installed_packages=lambda: [
+        SimpleNamespace(from_code="en", to_code="es"),
+        SimpleNamespace(from_code="es", to_code="en"),
+    ])
+    translation = SimpleNamespace(translate=lambda *_args: "Hola")
+    argos = SimpleNamespace(package=packages, translate=translation)
+    monkeypatch.setitem(sys.modules, "argostranslate", argos)
+    monkeypatch.setitem(sys.modules, "argostranslate.package", packages)
+    monkeypatch.setitem(sys.modules, "argostranslate.translate", translation)
+    runtime = CaptionRuntime(module.RuntimeConfig.from_environment({
+        "TRANSLATOR_CAPTION_RETENTION_SECONDS": "10",
+    }))
+    runtime.backend = Backend()
+    runtime.captions_dir = tmp_path / "captions"
+    ids = []
+    try:
+        for index in range(3):
+            response = asyncio.run(runtime.captions_upload(module.UploadFile(
+                BytesIO(str(index).encode()), filename="video.mp4",
+            )))
+            ids.append(json.loads(response.body)["job_id"])
+        assert entered.wait(2)
+        release.set()
+        wait_until(lambda: all("completed_at" in runtime.caption_jobs[job_id] for job_id in ids))
+        assert order == [b"0", b"1", b"2"]
+        assert all(runtime.caption_jobs[job_id]["status"] == "done" for job_id in ids)
+        job_id = ids[0]
+        filename = runtime.caption_jobs[job_id]["files"][0]
+        assert asyncio.run(runtime.captions_download(job_id, filename)).status_code == 200
+        assert "Hello" in (runtime.captions_dir / job_id / filename).read_text()
+        finished = max(job["completed_at"] for job in runtime.caption_jobs.values())
+        monkeypatch.setattr(time, "time", lambda: finished + 10)
+        assert asyncio.run(runtime.captions_status(job_id)).status_code == 404
+        assert not list(runtime.captions_dir.iterdir())
+    finally:
+        release.set()
+        asyncio.run(runtime.stop())
+
+
+def test_caption_translation_installation_and_translation_do_not_overlap(monkeypatch):
+    module = importlib.import_module("translator_runtime")
+    entered, release = threading.Event(), threading.Event()
+    overlap = []
+
+    def installed():
+        entered.set()
+        assert release.wait(3)
+        return [SimpleNamespace(from_code="en", to_code="es"),
+                SimpleNamespace(from_code="es", to_code="en")]
+
+    def translate(*_args):
+        overlap.append(not release.is_set())
+        return "Hola"
+
+    packages = SimpleNamespace(get_installed_packages=installed)
+    translation = SimpleNamespace(translate=translate)
+    monkeypatch.setitem(sys.modules, "argostranslate", SimpleNamespace(
+        package=packages, translate=translation,
+    ))
+    monkeypatch.setitem(sys.modules, "argostranslate.package", packages)
+    monkeypatch.setitem(sys.modules, "argostranslate.translate", translation)
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+    installer = threading.Thread(target=runtime.ensure_argos_packages, args=({},))
+    translator = threading.Thread(target=runtime.build_srt_entries, args=([
+        {"start": 0, "end": 1, "text": "Hello", "language": "en"},
+    ], {}))
+    try:
+        installer.start()
+        assert entered.wait(2)
+        translator.start()
+        time.sleep(0.05)
+    finally:
+        release.set()
+        installer.join(2)
+        translator.join(2)
+    assert overlap == [False]
+
+
+def test_caption_cleanup_does_not_follow_root_symlink(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+    outside = tmp_path / "outside"
+    job_dir = outside / "0123456789ab"
+    job_dir.mkdir(parents=True)
+    (job_dir / "keep").write_text("safe")
+    runtime.captions_dir = tmp_path / "captions"
+    runtime.captions_dir.symlink_to(outside, target_is_directory=True)
+    runtime.caption_jobs["0123456789ab"] = {"status": "done", "completed_at": 1}
+    asyncio.run(runtime.captions_status("0123456789ab"))
+    assert (job_dir / "keep").read_text() == "safe"
+
+
+def test_caption_configured_concurrency_and_http_capacity(tmp_path, monkeypatch):
+    module = importlib.import_module("translator_runtime")
+    application = importlib.import_module("app")
+    release = threading.Event()
+    entered = queue.Queue()
+
+    class Runtime(module.TranslatorRuntime):  # pylint: disable=too-few-public-methods
+        async def start(self):
+            pass
+
+        def extract_audio_16k(self, video_path, _audio_path):
+            entered.put(video_path)
+            assert release.wait(5)
+            return "fixture finished"
+
+    runtime = Runtime(module.RuntimeConfig.from_environment({
+        "TRANSLATOR_CAPTION_CONCURRENCY": "2", "TRANSLATOR_CAPTION_QUEUE_CAPACITY": "1",
+    }))
+    runtime.captions_dir = tmp_path / "captions"
+    monkeypatch.chdir(tmp_path)
+
+    async def exercise():
+        app = application.create_app(lambda: runtime)
+        async with app.router.lifespan_context(app):
+            try:
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                             base_url="http://test") as client:
+                    responses = [await client.post("/captions/upload", files={
+                        "file": ("video.mp4", b"video"),
+                    }) for _ in range(4)]
+                    assert [response.status_code for response in responses] == [200, 200, 200, 429]
+                    assert "capacity" in responses[-1].json()["error"]
+                    entered.get(timeout=2)
+                    entered.get(timeout=2)
+                    assert entered.empty()
+                    assert len(list(runtime.captions_dir.iterdir())) == 3
+                    assert sum(worker.name.startswith("caption-worker-") for worker in
+                               runtime.worker_threads) == 2
+            finally:
+                release.set()
+
+    asyncio.run(exercise())
+
+
+def test_caption_periodic_sweep_expires_failed_job_without_requests(tmp_path):
+    module = importlib.import_module("translator_runtime")
+
+    class Runtime(module.TranslatorRuntime):  # pylint: disable=too-few-public-methods
+        def extract_audio_16k(self, _video_path, _audio_path):
+            raise OSError("broken media")
+
+    runtime = Runtime(module.RuntimeConfig.from_environment({
+        "TRANSLATOR_CAPTION_RETENTION_SECONDS": "1",
+    }))
+    runtime.captions_dir = tmp_path / "captions"
+    try:
+        response = asyncio.run(runtime.captions_upload(module.UploadFile(
+            BytesIO(b"video"), filename="video.mp4",
+        )))
+        job_id = json.loads(response.body)["job_id"]
+        wait_until(lambda: "completed_at" in runtime.caption_jobs[job_id])
+        assert runtime.caption_jobs[job_id]["message"] == "broken media"
+        wait_until(lambda: job_id not in runtime.caption_jobs)
+        assert not (runtime.captions_dir / job_id).exists()
+    finally:
+        asyncio.run(runtime.stop())
+
+
+def test_caption_shutdown_aborts_upload_at_next_chunk_without_storing_it(tmp_path):
+    module = importlib.import_module("translator_runtime")
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+    runtime.captions_dir = tmp_path / "captions"
+    reads = []
+
+    class InterruptedUpload(module.UploadFile):  # pylint: disable=too-few-public-methods
+        async def read(self, size=-1):
+            reads.append(size)
+            if len(reads) == 1:
+                await runtime.stop()
+            return await super().read(size)
+
+    upload = InterruptedUpload(BytesIO(b"v" * 2097152), filename="video.mp4")
+    with pytest.raises(RuntimeError, match="Runtime stopped"):
+        asyncio.run(runtime.captions_upload(upload))
+    assert len(reads) == 1
+    assert upload.file.closed
+    assert not list(runtime.captions_dir.iterdir())
+    assert not runtime.caption_jobs
+
+
+def test_caption_expiry_hides_jobs_when_artifact_removal_needs_retry(tmp_path, monkeypatch):
+    module = importlib.import_module("translator_runtime")
+    runtime = module.TranslatorRuntime(module.RuntimeConfig.from_environment({}))
+    runtime.captions_dir = tmp_path / "captions"
+    job_id = "0123456789ab"
+    job_dir = runtime.captions_dir / job_id
+    job_dir.mkdir(parents=True)
+    (job_dir / "video.original.srt").write_text("private captions")
+    os.utime(job_dir, (1, 1))
+    runtime.caption_jobs[job_id] = {"status": "done", "completed_at": 1,
+                                    "files": ["video.original.srt"]}
+    manager_module = importlib.import_module("caption_jobs")
+
+    def cannot_remove(_path):
+        raise PermissionError("busy filesystem")
+
+    with monkeypatch.context() as context:
+        context.setattr(manager_module.shutil, "rmtree", cannot_remove)
+        assert asyncio.run(runtime.captions_status(job_id)).status_code == 404
+        download = asyncio.run(runtime.captions_download(job_id, "video.original.srt"))
+        assert download.status_code == 404
+        assert job_dir.exists()
+    asyncio.run(runtime.captions_status(job_id))
+    assert not job_dir.exists()
 
 
 def test_audio_silence_retains_only_preroll_without_repeated_copying(tmp_path, monkeypatch):
@@ -584,7 +996,7 @@ def test_upload_failure_removes_files_and_job_and_closes_upload(
         original_start = threading.Thread.start
 
         def fail_start(thread):
-            if thread._target == runtime.caption_worker:  # pylint: disable=protected-access
+            if thread.name.startswith("caption-worker-"):
                 raise failure_error
             original_start(thread)
         monkeypatch.setattr(threading.Thread, "start", fail_start)
@@ -670,6 +1082,8 @@ def test_existing_http_routes_use_runtime_files(tmp_path):
             (self.captions_dir / "job" / "video.original.srt").write_text(
                 "1\n00:00:00,000 --> 00:00:01,000\nhola\n", encoding="utf-8",
             )
+            self.caption_jobs["job"] = {"status": "done", "completed_at": time.time(),
+                                        "files": ["video.original.srt"]}
 
     async def exercise():
         app = application.create_app(lambda: FileRuntime(module.RuntimeConfig.from_environment({})))
@@ -1323,7 +1737,7 @@ def test_cleanup_continues_after_a_resource_failure(tmp_path, monkeypatch, failu
             original_start = threading.Thread.start
 
             def fail_caption_start(thread):
-                if thread._target == runtime.caption_worker:  # pylint: disable=protected-access
+                if thread.name.startswith("caption-worker-"):
                     raise RuntimeError("caption thread could not start")
                 original_start(thread)
 
