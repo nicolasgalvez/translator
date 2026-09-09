@@ -18,6 +18,8 @@ permissions:
   contents: read
 
 jobs:
+  workflow-syntax:
+    uses: ./.github/workflows/actionlint.yml
   lint:
     uses: ./.github/workflows/pylint.yml
   test:
