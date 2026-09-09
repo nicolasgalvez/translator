@@ -52,6 +52,10 @@
             color: #888;
             white-space: nowrap;
         }
+        .corruption-notice {
+            color: #ffca70;
+            font-size: 0.8rem;
+        }
         .empty {
             text-align: center;
             color: #555;
@@ -81,6 +85,12 @@
             <a class="transcript-item" href="/history/{{ t.filename }}">
                 <span class="transcript-label">{{ t.label }}</span>
                 <span class="transcript-count">{{ t.count }}{% if t.count_truncated %}+{% endif %} segments</span>
+                {% if t.skipped_records %}
+                <span class="corruption-notice">{{ t.skipped_records }} damaged record{% if t.skipped_records != 1 %}s{% endif %} skipped{% if t.scan_truncated %} in inspected history{% endif %}</span>
+                {% endif %}
+                {% if t.scan_truncated %}
+                <span class="corruption-notice">History inspection stopped at its read limit.</span>
+                {% endif %}
             </a>
             {% endfor %}
         </div>

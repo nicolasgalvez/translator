@@ -1,10 +1,27 @@
 """Bounded, presentation-ready access to saved transcript sessions."""
 
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 import heapq
 import json
+import logging
+import os
 from pathlib import Path
+
+LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class _ReverseScanState:
+    """Bounded state retained while transcript records are read newest-first."""
+
+    recent: deque[dict]
+    right_boundary_complete: bool
+    record: bytes = b""
+    record_oversized: bool = False
+    skipped_records: int = 0
+    entries_truncated: bool = False
 
 
 class TranscriptHistoryReader:
@@ -13,6 +30,9 @@ class TranscriptHistoryReader:
     _READ_CHUNK_BYTES = 65536
     _MAX_ENTRY_BYTES = 65536
     _MAX_DETAIL_BYTES = 4 * 1024 * 1024
+    # Covers more than 1,000 typical 64 KiB records and twice the worst-case
+    # bytes needed to count the default 500-entry view plus one.
+    _MAX_LIST_BYTES = 64 * 1024 * 1024
 
     def __init__(self, directory: Path, session_limit: int, entry_limit: int):
         self.directory = directory
@@ -33,12 +53,17 @@ class TranscriptHistoryReader:
         sessions_truncated = len(candidates) > self.session_limit
         transcripts = []
         for display_path, resolved_path in candidates[:self.session_limit]:
-            count, count_truncated = self._count_entries(resolved_path)
+            count, count_truncated, scan_truncated, skipped_records = (
+                self._count_entries(resolved_path)
+            )
+            self._warn_corruption(display_path.name, skipped_records, "listing history")
             transcripts.append({
                 "filename": display_path.name,
                 "label": self._label(display_path.stem),
                 "count": count,
                 "count_truncated": count_truncated,
+                "scan_truncated": scan_truncated,
+                "skipped_records": skipped_records,
             })
         return {
             "transcripts": transcripts,
@@ -54,13 +79,18 @@ class TranscriptHistoryReader:
         path = self._resolved_file(self.directory.resolve(), requested_path)
         if path is None:
             return None
-        entries, entries_truncated = self._read_recent_entries(path)
+        entries, entries_truncated, scan_truncated, skipped_records = (
+            self._read_recent_entries(path)
+        )
+        self._warn_corruption(requested_path.name, skipped_records, "reading history")
         stem = requested_path.stem
         has_audio = self.audio_file(f"{stem}.wav") is not None
         return {
             "label": self._label(stem),
             "entries": list(entries),
             "entries_truncated": entries_truncated,
+            "scan_truncated": scan_truncated,
+            "skipped_records": skipped_records,
             "entry_limit": self.entry_limit,
             "has_audio": has_audio,
             "audio_url": f"/audio/{stem}.wav" if has_audio else None,
@@ -74,54 +104,145 @@ class TranscriptHistoryReader:
             return None
         return self._resolved_file(self.directory.resolve(), requested_path)
 
-    def _count_entries(self, path: Path) -> tuple[int, bool]:
+    def _count_entries(self, path: Path) -> tuple[int, bool, bool, int]:
         count = 0
+        count_truncated = False
+        scan_truncated = False
+        skipped_records = 0
         with path.open("rb") as transcript:
-            while line := transcript.readline(self._MAX_ENTRY_BYTES + 2):
-                if line.endswith(b"\n"):
-                    line = line[:-1]
-                self._validate_entry_size(line)
+            remaining, snapshot_has_suffix = self._listing_snapshot(transcript)
+            while remaining:
+                line, remaining = self._read_listing_line(transcript, remaining)
+                if not line:
+                    break
+                terminated = line.endswith(b"\n")
+                if not terminated and len(line) > self._MAX_ENTRY_BYTES:
+                    remaining = self._drain_oversized_record(transcript, remaining)
+                    skipped_records += 1
+                    if not remaining:
+                        scan_truncated = snapshot_has_suffix is not False
+                        break
+                    continue
+                if not terminated:
+                    if not remaining and snapshot_has_suffix is not False:
+                        scan_truncated = True
+                    else:
+                        skipped_records += int(bool(line.strip()))
+                    break
+                line = line[:-1]
                 if line.strip():
-                    json.loads(line)
-                    count += 1
-                    if count > self.entry_limit:
-                        return self.entry_limit, True
-        return count, False
+                    if self._decode_entry(line) is None:
+                        skipped_records += 1
+                        continue
+                    if count < self.entry_limit:
+                        count += 1
+                    else:
+                        count_truncated = True
+                        scan_truncated = True
+                        break
+            else:
+                scan_truncated = snapshot_has_suffix is not False
+        return count, count_truncated, scan_truncated, skipped_records
 
-    def _read_recent_entries(self, path: Path) -> tuple[list[dict], bool]:
-        recent = deque(maxlen=self.entry_limit)
+    def _listing_snapshot(self, transcript) -> tuple[int, bool | None]:
+        try:
+            snapshot_size = os.fstat(transcript.fileno()).st_size
+        except (AttributeError, OSError, TypeError):
+            return self._MAX_LIST_BYTES, None
+        return min(snapshot_size, self._MAX_LIST_BYTES), snapshot_size > self._MAX_LIST_BYTES
+
+    def _read_listing_line(self, transcript, remaining: int) -> tuple[bytes, int]:
+        read_size = min(self._MAX_ENTRY_BYTES + 2, remaining)
+        line = transcript.readline(read_size)
+        return line, remaining - len(line)
+
+    def _drain_oversized_record(self, transcript, remaining: int) -> int:
+        while remaining:
+            line, remaining = self._read_listing_line(transcript, remaining)
+            if not line:
+                break
+            if line.endswith(b"\n"):
+                break
+        return remaining
+
+    def _read_recent_entries(self, path: Path) -> tuple[list[dict], bool, bool, int]:
         with path.open("rb") as transcript:
             transcript.seek(0, 2)
             position = transcript.tell()
             remaining = min(position, self._MAX_DETAIL_BYTES)
-            leading = b""
+            right_boundary_complete = position == 0
+            if position:
+                transcript.seek(-1, 2)
+                right_boundary_complete = transcript.read(1) == b"\n"
+            state = _ReverseScanState(
+                deque(maxlen=self.entry_limit), right_boundary_complete,
+            )
             while position and remaining:
                 size = min(self._READ_CHUNK_BYTES, position, remaining)
                 position -= size
                 transcript.seek(position)
                 chunk = transcript.read(size)
                 remaining -= len(chunk)
-                parts = (chunk + leading).split(b"\n")
-                leading = parts[0]
-                for line in reversed(parts[1:]):
-                    if not line.strip():
-                        continue
-                    if len(recent) == self.entry_limit:
-                        return list(reversed(recent)), True
-                    recent.append(self._parse_entry(line))
-                if len(leading) > self._MAX_ENTRY_BYTES:
-                    raise ValueError(
-                        f"Transcript entry exceeds the maximum of {self._MAX_ENTRY_BYTES} bytes",
-                    )
-                if len(recent) == self.entry_limit and leading.strip():
-                    return list(reversed(recent)), True
+                if self._consume_reverse_chunk(state, chunk):
+                    return self._reverse_result(state, scan_truncated=False)
             if position:
-                return list(reversed(recent)), True
-            if leading.strip():
-                if len(recent) == self.entry_limit:
-                    return list(reversed(recent)), True
-                recent.append(self._parse_entry(leading))
-        return list(reversed(recent)), False
+                if state.record_oversized or not state.right_boundary_complete:
+                    state.skipped_records += 1
+                return self._reverse_result(state, scan_truncated=True)
+            self._consume_oldest_record(state)
+        return self._reverse_result(state, scan_truncated=False)
+
+    def _consume_reverse_chunk(
+        self, state: _ReverseScanState, chunk: bytes,
+    ) -> bool:
+        parts = (chunk + state.record).split(b"\n")
+        boundary_complete = state.right_boundary_complete
+        oversized = state.record_oversized
+        for index in range(len(parts) - 1, 0, -1):
+            line = parts[index]
+            if not boundary_complete:
+                state.skipped_records += int(bool(line.strip()) or oversized)
+            elif oversized:
+                state.skipped_records += 1
+            elif line.strip():
+                entry = self._decode_entry(line)
+                if entry is None:
+                    state.skipped_records += 1
+                elif len(state.recent) == self.entry_limit:
+                    state.entries_truncated = True
+                    return True
+                else:
+                    state.recent.append(entry)
+            boundary_complete = True
+            oversized = False
+        state.record = parts[0]
+        state.record_oversized = oversized or len(state.record) > self._MAX_ENTRY_BYTES
+        if state.record_oversized:
+            state.record = b""
+        state.right_boundary_complete = boundary_complete
+        return False
+
+    def _consume_oldest_record(self, state: _ReverseScanState) -> None:
+        if state.record_oversized:
+            state.skipped_records += 1
+        elif state.record.strip():
+            if not state.right_boundary_complete:
+                state.skipped_records += 1
+                return
+            entry = self._decode_entry(state.record)
+            if entry is None:
+                state.skipped_records += 1
+            elif len(state.recent) == self.entry_limit:
+                state.entries_truncated = True
+            else:
+                state.recent.append(entry)
+
+    @staticmethod
+    def _reverse_result(state: _ReverseScanState, scan_truncated: bool):
+        return (
+            list(reversed(state.recent)), state.entries_truncated,
+            scan_truncated, state.skipped_records,
+        )
 
     def _session_files(self, root: Path):
         for path in self.directory.iterdir():
@@ -142,14 +263,46 @@ class TranscriptHistoryReader:
             pass
         return None
 
-    def _parse_entry(self, line: bytes) -> dict:
-        self._validate_entry_size(line)
-        return json.loads(line)
+    @classmethod
+    def _decode_entry(cls, line: bytes) -> dict | None:
+        if len(line) > cls._MAX_ENTRY_BYTES:
+            return None
+        try:
+            entry = json.loads(line, parse_constant=cls._reject_json_constant)
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            return None
+        if not isinstance(entry, dict) or cls._contains_unicode_surrogate(entry):
+            return None
+        return entry
 
-    def _validate_entry_size(self, line: bytes) -> None:
-        if len(line) > self._MAX_ENTRY_BYTES:
-            raise ValueError(
-                f"Transcript entry exceeds the maximum of {self._MAX_ENTRY_BYTES} bytes",
+    @staticmethod
+    def _contains_unicode_surrogate(entry: dict) -> bool:
+        pending = [entry]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, str):
+                if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+                    return True
+            elif isinstance(value, dict):
+                pending.extend(value.keys())
+                pending.extend(value.values())
+            elif isinstance(value, list):
+                pending.extend(value)
+        return False
+
+    @staticmethod
+    def _reject_json_constant(value: str):
+        raise ValueError(f"Invalid JSON constant: {value}")
+
+    @staticmethod
+    def _warn_corruption(filename: str, skipped_records: int, operation: str) -> None:
+        if skipped_records:
+            LOGGER.warning(
+                "Skipped %d corrupt record%s in %s while %s",
+                skipped_records,
+                "" if skipped_records == 1 else "s",
+                ascii(filename),
+                operation,
             )
 
     @staticmethod
