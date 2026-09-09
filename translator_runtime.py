@@ -15,10 +15,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import quote
 
 from fastapi import WebSocket, WebSocketDisconnect, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
@@ -732,12 +731,6 @@ class TranslatorRuntime:
         if ".." in filename or "/" in filename:
             return JSONResponse({"error": "Invalid filename"}, status_code=400)
         try:
-            content = await asyncio.to_thread(self.caption_manager.read_download, job_id, filename)
+            return await self.caption_manager.download_response(job_id, filename)
         except OSError:
             return JSONResponse({"error": "File not found"}, status_code=404)
-        encoded_filename = quote(filename)
-        disposition = (f"attachment; filename*=utf-8''{encoded_filename}"
-                       if encoded_filename != filename else f'attachment; filename="{filename}"')
-        return Response(content, media_type="application/x-subrip", headers={
-            "Content-Disposition": disposition,
-        })

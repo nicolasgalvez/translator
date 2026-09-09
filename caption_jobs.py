@@ -1,11 +1,76 @@
 """Bounded, in-process caption scheduling and retained artifact ownership."""
 
+import asyncio
 import logging
+import os
 import queue
 import re
 import shutil
 import threading
 import time
+from urllib.parse import quote
+
+from starlette.responses import StreamingResponse
+
+
+class CaptionDownloadLease:
+    """One open published artifact; reads and finalization share an I/O lock."""
+
+    def __init__(self, manager, job_id, stream):
+        self.manager = manager
+        self.job_id = job_id
+        self.stream = stream
+        self.size = os.fstat(stream.fileno()).st_size
+        self._remaining = self.size
+        self._io_lock = threading.Lock()
+        self._closed = False
+
+    def read(self):
+        with self._io_lock:
+            if self._closed or not self._remaining:
+                return b""
+            chunk = self.stream.read(min(65536, self._remaining))
+            if not chunk:
+                raise OSError("Caption file ended before its advertised length")
+            self._remaining -= len(chunk)
+            return chunk
+
+    def close(self):
+        with self._io_lock:
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                self.stream.close()
+            except OSError:
+                logging.exception("Could not close caption download %s", self.job_id)
+            finally:
+                self.manager.release_download(self.job_id)
+
+
+class CaptionDownloadResponse(StreamingResponse):
+    """Keep the acquisition lease until sending ends, fails, or is canceled."""
+
+    def __init__(self, lease, filename):
+        self.lease = lease
+        encoded_filename = quote(filename)
+        disposition = (f"attachment; filename*=utf-8''{encoded_filename}"
+                       if encoded_filename != filename else f'attachment; filename="{filename}"')
+        super().__init__(self._chunks(), media_type="application/x-subrip", headers={
+            "Content-Disposition": disposition, "Content-Length": str(lease.size),
+        })
+
+    async def _chunks(self):
+        while chunk := await asyncio.to_thread(self.lease.read):
+            yield chunk
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # A canceled thread-backed read keeps the I/O lock until it returns.
+            # Closing waits off-loop and releases ownership exactly once.
+            await asyncio.shield(asyncio.to_thread(self.lease.close))
 
 
 class CaptionJobManager:  # pylint: disable=too-many-instance-attributes
@@ -83,20 +148,51 @@ class CaptionJobManager:  # pylint: disable=too-many-instance-attributes
                 job["completed_at"] = time.time()
             self._occupied.discard(job_id)
 
-    def read_download(self, job_id, filename):
-        """Claim retained data atomically and return bytes independent of disk lifetime."""
+    def open_download(self, job_id, filename):
+        """Claim a retained published subtitle, then open it outside the manager lock."""
         with self._lock:
             self._retire_expired(time.time() - self.runtime.config.caption_retention_seconds)
-            if job_id not in self.jobs or job_id in self._cleaning:
-                raise FileNotFoundError("Caption job is no longer retained")
+            job = self.jobs.get(job_id)
+            if (not job or job.get("status") != "done" or filename not in job.get("files", [])
+                    or job_id in self._cleaning):
+                raise FileNotFoundError("Published caption file is not retained")
             self._downloads[job_id] = self._downloads.get(job_id, 0) + 1
+        stream = None
         try:
-            return (self.runtime.captions_dir / job_id / filename).read_bytes()
-        finally:
-            with self._lock:
-                self._downloads[job_id] -= 1
-                if not self._downloads[job_id]:
-                    del self._downloads[job_id]
+            stream = (self.runtime.captions_dir / job_id / filename).open("rb")
+            return CaptionDownloadLease(self, job_id, stream)
+        except BaseException:
+            try:
+                if stream is not None:
+                    stream.close()
+            finally:
+                self.release_download(job_id)
+            raise
+
+    def release_download(self, job_id):
+        with self._lock:
+            self._downloads[job_id] -= 1
+            if not self._downloads[job_id]:
+                del self._downloads[job_id]
+
+    async def download_response(self, job_id, filename):
+        operation = asyncio.create_task(asyncio.to_thread(self.open_download, job_id, filename))
+        try:
+            lease = await asyncio.shield(operation)
+        except BaseException:
+            # The opening thread may finish after request cancellation. Its result
+            # still has an owner that closes it without blocking the event loop.
+            operation.add_done_callback(self._close_abandoned_download)
+            raise
+        return CaptionDownloadResponse(lease, filename)
+
+    @staticmethod
+    def _close_abandoned_download(operation):
+        try:
+            lease = operation.result()
+        except BaseException:  # pylint: disable=broad-exception-caught
+            return
+        asyncio.get_running_loop().run_in_executor(None, lease.close)
 
     def stop(self):
         with self._lock:

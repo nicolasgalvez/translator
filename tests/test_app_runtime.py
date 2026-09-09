@@ -275,7 +275,7 @@ def test_caption_workers_finish_fifo_and_expire_success_artifacts(tmp_path, monk
         assert all(runtime.caption_jobs[job_id]["status"] == "done" for job_id in ids)
         job_id = ids[0]
         filename = runtime.caption_jobs[job_id]["files"][0]
-        assert asyncio.run(runtime.captions_download(job_id, filename)).status_code == 200
+        assert asyncio.run(request_caption_download(runtime, job_id, filename)).status_code == 200
         assert "Hello" in (runtime.captions_dir / job_id / filename).read_text()
         finished = max(job["completed_at"] for job in runtime.caption_jobs.values())
         monkeypatch.setattr(time, "time", lambda: finished + 10)
@@ -624,12 +624,13 @@ def test_caption_download_body_survives_expiry_after_response_headers(
             now[0] = 1001
             await asyncio.to_thread(runtime.caption_manager.sweep)
             assert job_id not in runtime.caption_jobs
-            assert not path.exists()
+            assert path.exists()  # An accepted stream owns the file through its final body.
 
     async def exercise():
         app = application.create_app(lambda: runtime)
         async with app.router.lifespan_context(app):
-            await app({"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+            await app({"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"},
+                       "http_version": "1.1",
                        "method": "GET", "scheme": "http", "headers": [], "query_string": b"",
                        "path": f"/captions/download/{job_id}/{path.name}", "root_path": "",
                        "server": ("test", 80), "client": ("test", 1234)}, receive, send)
@@ -640,9 +641,68 @@ def test_caption_download_body_survives_expiry_after_response_headers(
     assert headers[b"content-type"] == b"application/x-subrip"
     assert headers[b"content-length"] == str(len(content)).encode()
     assert headers[b"content-disposition"] == b'attachment; filename="video.original.srt"'
+    runtime.caption_manager.sweep()
+    assert not path.exists()
 
 
-def test_caption_download_claim_protects_read_and_rejects_requests_after_retirement(
+async def request_caption_download(runtime, job_id, filename):
+    """Send the real ASGI route without acquiring unrelated audio hardware."""
+    app = importlib.import_module("app").create_app(lambda: runtime)
+    app.state.runtime = runtime
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://test") as client:
+        return await client.get(f"/captions/download/{job_id}/{filename}")
+
+
+@pytest.mark.parametrize("status, filename, published", [
+    ("processing", "audio.wav", []), ("error", "audio.wav", []),
+    ("done", "audio.wav", ["video.original.srt"]),
+    ("done", "original.upload", ["video.original.srt"]),
+    ("processing", "video.original.srt", ["video.original.srt"]),
+])
+def test_caption_download_rejects_unpublished_working_files(
+    download_runtime, monkeypatch, status, filename, published,
+):
+    runtime, job_id, path = download_runtime
+    monkeypatch.setattr(time, "time", lambda: 1000.9)
+    (path.parent / filename).write_bytes(b"private working data")
+    runtime.caption_jobs[job_id].update(status=status, files=published)
+    response = asyncio.run(request_caption_download(runtime, job_id, filename))
+    assert response.status_code == 404
+
+
+def test_caption_download_streams_large_published_subtitle_in_bounded_frames(
+    download_runtime, monkeypatch,
+):
+    runtime, job_id, path = download_runtime
+    monkeypatch.setattr(time, "time", lambda: 1000.9)
+    content = b"subtitle data\n" * 100000
+    path.write_bytes(content)
+    messages = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        messages.append(message)
+
+    async def exercise():
+        app = importlib.import_module("app").create_app(lambda: runtime)
+        app.state.runtime = runtime
+        await app({"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"},
+                   "http_version": "1.1", "method": "GET", "scheme": "http", "headers": [],
+                   "query_string": b"", "path": f"/captions/download/{job_id}/{path.name}",
+                   "root_path": "", "server": ("test", 80), "client": ("test", 1234)},
+                  receive, send)
+
+    asyncio.run(exercise())
+    bodies = [message["body"] for message in messages if message["type"] == "http.response.body"]
+    assert b"".join(bodies) == content
+    assert max(map(len, bodies)) <= 65536
+    assert dict(messages[0]["headers"])[b"content-length"] == str(len(content)).encode()
+
+
+def test_caption_download_claim_protects_open_and_rejects_requests_after_retirement(
     download_runtime, monkeypatch,
 ):
     runtime, job_id, path = download_runtime
@@ -650,16 +710,16 @@ def test_caption_download_claim_protects_read_and_rejects_requests_after_retirem
     now = [1000.9]
     monkeypatch.setattr(time, "time", lambda: now[0])
     reading, release = threading.Event(), threading.Event()
-    original_read = Path.read_bytes
-    content = original_read(path)
+    original_open = Path.open
+    content = path.read_bytes()
 
-    def slow_read(candidate):
+    def slow_open(candidate, *args, **kwargs):
         if candidate == path:
             reading.set()
             assert release.wait(3)
-        return original_read(candidate)
+        return original_open(candidate, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_bytes", slow_read)
+    monkeypatch.setattr(Path, "open", slow_open)
 
     async def exercise():
         app = application.create_app(lambda: runtime)
@@ -688,15 +748,15 @@ def test_caption_download_claim_protects_read_and_rejects_requests_after_retirem
     asyncio.run(exercise())
 
 
-def test_caption_download_read_failure_releases_cleanup_claim(download_runtime, monkeypatch):
+def test_caption_download_open_failure_releases_cleanup_claim(download_runtime, monkeypatch):
     runtime, job_id, path = download_runtime
     now = [1000.9]
     monkeypatch.setattr(time, "time", lambda: now[0])
 
-    def unreadable(_path):
+    def unreadable(_path, *_args, **_kwargs):
         raise PermissionError("temporarily unreadable")
 
-    monkeypatch.setattr(Path, "read_bytes", unreadable)
+    monkeypatch.setattr(Path, "open", unreadable)
     response = asyncio.run(runtime.captions_download(job_id, path.name))
     assert response.status_code == 404
     now[0] = 1001
@@ -740,24 +800,24 @@ def test_caption_download_started_after_cleanup_claim_is_404(download_runtime, m
     assert not path.exists()
 
 
-def test_caption_canceled_download_keeps_lease_until_background_read_finishes(
+def test_caption_canceled_download_keeps_lease_until_background_open_finishes(
     download_runtime, monkeypatch,
 ):
     runtime, job_id, path = download_runtime
     now = [1000.9]
     monkeypatch.setattr(time, "time", lambda: now[0])
     reading, release, finished = threading.Event(), threading.Event(), threading.Event()
-    original_read = Path.read_bytes
+    original_open = Path.open
 
-    def slow_read(candidate):
+    def slow_open(candidate, *args, **kwargs):
         reading.set()
         assert release.wait(3)
         try:
-            return original_read(candidate)
+            return original_open(candidate, *args, **kwargs)
         finally:
             finished.set()
 
-    monkeypatch.setattr(Path, "read_bytes", slow_read)
+    monkeypatch.setattr(Path, "open", slow_open)
 
     async def exercise():
         request = asyncio.create_task(runtime.captions_download(job_id, path.name))
@@ -773,7 +833,7 @@ def test_caption_canceled_download_keeps_lease_until_background_read_finishes(
         finally:
             release.set()
             assert await asyncio.to_thread(finished.wait, 1)
-        # The executor task releases its lease after read_bytes returns.
+        # Abandoned acquisition closes its result after the background open returns.
         for _ in range(100):
             await asyncio.to_thread(runtime.caption_manager.sweep)
             if not path.exists():
@@ -789,11 +849,218 @@ def test_caption_download_encodes_attachment_filename(download_runtime, monkeypa
     monkeypatch.setattr(time, "time", lambda: 1000.9)
     renamed = path.with_name('résumé "original".srt')
     path.rename(renamed)
-    response = asyncio.run(runtime.captions_download(job_id, renamed.name))
+    runtime.caption_jobs[job_id]["files"] = [renamed.name]
+    response = asyncio.run(request_caption_download(runtime, job_id, renamed.name))
     assert response.status_code == 200
     assert response.headers["Content-Disposition"] == (
         "attachment; filename*=utf-8''r%C3%A9sum%C3%A9%20%22original%22.srt"
     )
+
+
+@pytest.mark.parametrize("ending", ["complete", "send-error", "read-error", "cancel", "disconnect"])
+def test_caption_stream_finalization_closes_once_and_releases_retention(
+    download_runtime, monkeypatch, ending,
+):
+    # pylint: disable=too-many-locals,too-many-statements
+    runtime, job_id, path = download_runtime
+    path.write_bytes(b"subtitles\n" * 20000)
+    now = [1000.9]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    original_open = Path.open
+    handles = []
+
+    class ObservedFile:
+        def __init__(self, stream):
+            self.stream = stream
+            self.reads = []
+            self.closes = 0
+
+        def fileno(self):
+            return self.stream.fileno()
+
+        def read(self, size):
+            self.reads.append(size)
+            if ending == "read-error" and len(self.reads) == 2:
+                raise OSError("disk read failed")
+            return self.stream.read(size)
+
+        def close(self):
+            self.closes += 1
+            self.stream.close()
+
+    def observed_open(candidate, *args, **kwargs):
+        stream = original_open(candidate, *args, **kwargs)  # pylint: disable=consider-using-with
+        if candidate != path:
+            return stream
+        handle = ObservedFile(stream)
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", observed_open)
+
+    async def exercise():
+        app = importlib.import_module("app").create_app(lambda: runtime)
+        app.state.runtime = runtime
+        disconnect = asyncio.Event()
+
+        async def receive():
+            await disconnect.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                assert message["status"] == 200
+                now[0] = 1001
+                await asyncio.to_thread(runtime.caption_manager.sweep)
+                assert path.exists()
+            elif message.get("body"):
+                assert len(message["body"]) <= 65536
+                if ending == "send-error":
+                    raise ConnectionError("peer disconnected")
+                if ending == "cancel":
+                    raise asyncio.CancelledError
+                if ending == "disconnect":
+                    disconnect.set()
+                    await asyncio.sleep(0)
+
+        call = app({"type": "http", "asgi": {"version": "3.0", "spec_version":
+                    "2.0" if ending == "disconnect" else "2.4"}, "http_version": "1.1",
+                    "method": "GET", "scheme": "http", "headers": [], "query_string": b"",
+                    "path": f"/captions/download/{job_id}/{path.name}", "root_path": "",
+                    "server": ("test", 80), "client": ("test", 1234)}, receive, send)
+        if ending == "cancel":
+            with pytest.raises(asyncio.CancelledError):
+                await call
+        elif ending in ("send-error", "read-error"):
+            with pytest.raises(importlib.import_module("starlette.requests").ClientDisconnect):
+                await call
+        else:
+            await call
+        await asyncio.to_thread(runtime.caption_manager.sweep)
+
+    asyncio.run(exercise())
+    assert len(handles) == 1
+    assert handles[0].closes == 1
+    assert handles[0].stream.closed
+    assert all(size <= 65536 for size in handles[0].reads)
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("second_ending", ["complete", "cancel"])
+def test_caption_multiple_streams_keep_independent_retention_leases(
+    download_runtime, monkeypatch, second_ending,
+):
+    runtime, job_id, path = download_runtime
+    now = [1000.9]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+
+    async def exercise():
+        app = importlib.import_module("app").create_app(lambda: runtime)
+        app.state.runtime = runtime
+        entered = [asyncio.Event(), asyncio.Event()]
+        release = [asyncio.Event(), asyncio.Event()]
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def stream(index):
+            async def send(message):
+                if message["type"] == "http.response.start":
+                    assert message["status"] == 200
+                    entered[index].set()
+                    await release[index].wait()
+
+            await app({"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"},
+                       "http_version": "1.1", "method": "GET", "scheme": "http", "headers": [],
+                       "query_string": b"", "path": f"/captions/download/{job_id}/{path.name}",
+                       "root_path": "", "server": ("test", 80), "client": ("test", 1234)},
+                      receive, send)
+
+        tasks = [asyncio.create_task(stream(index)) for index in range(2)]
+        try:
+            await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered)), 1)
+            now[0] = 1001
+            await asyncio.to_thread(runtime.caption_manager.sweep)
+            assert job_id not in runtime.caption_jobs
+            assert path.exists()
+            release[0].set()
+            await tasks[0]
+            await asyncio.to_thread(runtime.caption_manager.sweep)
+            assert path.exists()
+            if second_ending == "cancel":
+                tasks[1].cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await tasks[1]
+            else:
+                release[1].set()
+                await tasks[1]
+            await asyncio.to_thread(runtime.caption_manager.sweep)
+            assert not path.exists()
+        finally:
+            for event in release:
+                event.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(exercise())
+
+
+def test_caption_cancel_during_inflight_read_closes_after_read_returns(
+    download_runtime, monkeypatch,
+):
+    # pylint: disable=too-many-locals
+    runtime, job_id, path = download_runtime
+    now = [1000.9]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    reading, release = threading.Event(), threading.Event()
+    original_open = Path.open
+    handles = []
+
+    class SlowFile:
+        def __init__(self, stream):
+            self.stream = stream
+            self.closes = 0
+
+        def fileno(self):
+            return self.stream.fileno()
+
+        def read(self, size):
+            reading.set()
+            assert release.wait(3)
+            return self.stream.read(size)
+
+        def close(self):
+            self.closes += 1
+            self.stream.close()
+
+    def slow_open(candidate, *args, **kwargs):
+        stream = original_open(candidate, *args, **kwargs)  # pylint: disable=consider-using-with
+        if candidate != path:
+            return stream
+        handle = SlowFile(stream)
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", slow_open)
+
+    async def exercise():
+        request = asyncio.create_task(request_caption_download(runtime, job_id, path.name))
+        try:
+            assert await asyncio.to_thread(reading.wait, 1)
+            request.cancel()
+            now[0] = 1001
+            await asyncio.wait_for(asyncio.to_thread(runtime.caption_manager.sweep), 0.5)
+            assert path.exists()
+            assert not handles[0].stream.closed
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+        await asyncio.to_thread(runtime.caption_manager.sweep)
+        assert not path.exists()
+
+    asyncio.run(exercise())
+    assert handles[0].closes == 1
+    assert handles[0].stream.closed
 
 
 def test_audio_silence_retains_only_preroll_without_repeated_copying(tmp_path, monkeypatch):
