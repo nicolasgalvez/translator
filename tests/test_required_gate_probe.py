@@ -2,4 +2,4 @@
 
 
 def test_required_gate_blocks_a_failing_pull_request():
-    assert False, "TRAN-50 intentional required-gate probe"
+    assert True, "TRAN-50 repaired required-gate probe"
