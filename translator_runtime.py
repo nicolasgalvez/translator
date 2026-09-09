@@ -33,12 +33,23 @@ from plugin_loader import load_plugins
 from transcript_events import process_transcript_text, queue_transcript_render_event
 from transcript_history import TranscriptHistoryReader
 from websocket_security import WebSocketOriginPolicy
+from websocket_delivery import WebSocketDeliveryRegistry
 
 if TYPE_CHECKING:
     import numpy as np
 
 # Audio and model dependencies are only needed when their work starts.
 # pylint: disable=import-outside-toplevel
+
+
+def _positive_integer_setting(environ, variable: str, default: str) -> int:
+    try:
+        value = int(environ.get(variable, default))
+        if value <= 0:
+            raise ValueError
+    except ValueError as exc:
+        raise ValueError(f"{variable} must be a positive integer") from exc
+    return value
 
 
 @dataclass(frozen=True)
@@ -58,16 +69,7 @@ class RuntimeConfig:  # pylint: disable=too-many-instance-attributes
     caption_retention_seconds: int = 86400
     history_session_limit: int = 50
     history_entry_limit: int = 500
-
-    @staticmethod
-    def _positive_integer(environ, variable: str, default: str) -> int:
-        try:
-            value = int(environ.get(variable, default))
-            if value <= 0:
-                raise ValueError
-        except ValueError as exc:
-            raise ValueError(f"{variable} must be a positive integer") from exc
-        return value
+    websocket_queue_capacity: int = 32
 
     @classmethod
     def from_environment(cls, environ):
@@ -117,10 +119,14 @@ class RuntimeConfig:  # pylint: disable=too-many-instance-attributes
         history_settings = []
         for name, default in (("SESSION_LIMIT", "50"), ("ENTRY_LIMIT", "500")):
             variable = f"TRANSLATOR_HISTORY_{name}"
-            history_settings.append(cls._positive_integer(environ, variable, default))
+            history_settings.append(_positive_integer_setting(environ, variable, default))
+        websocket_queue_capacity = _positive_integer_setting(
+            environ, "TRANSLATOR_WEBSOCKET_QUEUE_CAPACITY", "32",
+        )
         return cls(values["HOST"], port, values["MODEL"], values["DEVICE"],
                    values["BACKEND"], LanguageOption.from_env(environ), max_upload_bytes,
-                   allowed_origins, *caption_settings, *history_settings)
+                   allowed_origins, *caption_settings, *history_settings,
+                   websocket_queue_capacity)
 
 
 class UploadTooLargeError(Exception):
@@ -144,7 +150,7 @@ class TranslatorRuntime:
         self.caption_translation_policy = CaptionTranslationPolicy()
         self._backend_lock = threading.Lock()
         self._translation_lock = threading.Lock()
-        self.clients: list[WebSocket] = []
+        self.client_deliveries = WebSocketDeliveryRegistry(config.websocket_queue_capacity)
         self.text_queue: queue.Queue[dict] = queue.Queue()
         self.audio_chunk_queue = DropOldestQueue(CAPTURE_QUEUE_CAPACITY, "capture")
         self.utterance_queue = DropOldestQueue(UTTERANCE_QUEUE_CAPACITY, "utterance")
@@ -235,12 +241,15 @@ class TranslatorRuntime:
                 writer, self.wav_writer = self.wav_writer, None
                 if writer is not None:
                     writer.close()
-        clients, self.clients = self.clients[:], []
-        for client in clients:
-            with self._capture_cleanup_error(errors):
-                await asyncio.wait_for(client.close(), timeout=1)
+        with self._capture_cleanup_error(errors):
+            await self.client_deliveries.close_all()
         if errors:
             raise errors[0]
+
+    @property
+    def clients(self) -> list[WebSocket]:
+        """Return the currently registered sockets for runtime observability."""
+        return self.client_deliveries.websockets
 
     @contextmanager
     def _capture_cleanup_error(self, errors):
@@ -397,19 +406,11 @@ class TranslatorRuntime:
             try:
                 entry = self.text_queue.get_nowait()
                 msg = json.dumps({"type": "transcript", "event": entry})
-                disconnected = []
-                for ws in self.clients:
-                    try:
-                        await ws.send_text(msg)
-                    # Any send failure means the socket is gone.
-                    except Exception:  # pylint: disable=broad-exception-caught
-                        disconnected.append(ws)
-                for ws in disconnected:
-                    if ws in self.clients:
-                        self.clients.remove(ws)
+                self.client_deliveries.broadcast(msg)
             except queue.Empty:
-                pass
-            await asyncio.sleep(0.1)
+                await asyncio.sleep(0.1)
+            else:
+                await asyncio.sleep(0)
 
     async def index(self, request: Request):
         index_file = self.frontend_dist / "index.html"
@@ -458,13 +459,14 @@ class TranslatorRuntime:
             await ws.close(code=1008)
             return
         await ws.accept()
-        self.clients.append(ws)
+        session = self.client_deliveries.register(ws)
         try:
             while True:
                 await ws.receive_text()
         except WebSocketDisconnect:
-            if ws in self.clients:
-                self.clients.remove(ws)
+            pass
+        finally:
+            await self.client_deliveries.unregister(session)
 
     def format_srt_time(self, seconds: float) -> str:
         h = int(seconds // 3600)

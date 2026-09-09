@@ -2653,7 +2653,7 @@ def test_runtime_shutdown_closes_owned_resources(
         assert await asyncio.to_thread(reading.wait, 2)
         assert runtime.text_queue is not other.text_queue
         assert runtime.audio_chunk_queue is not other.audio_chunk_queue
-        assert runtime.clients is not other.clients
+        assert runtime.client_deliveries is not other.client_deliveries
         assert runtime.caption_jobs is not other.caption_jobs
         runtime.caption_jobs["owned"] = {"status": "queued"}
         assert other.caption_jobs == {}
@@ -2725,7 +2725,7 @@ def test_cleanup_continues_after_a_resource_failure(tmp_path, monkeypatch, failu
 
         client = module.WebSocket({"type": "websocket"}, receive, send)
         await client.accept()
-        runtime.clients.append(client)
+        runtime.client_deliveries.register(client)
         if failure == "caption_thread_start":
             original_start = threading.Thread.start
 
