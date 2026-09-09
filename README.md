@@ -6,7 +6,7 @@ The existing video captions tool is still available at `/captions`.
 
 ## Prerequisites
 
-### Python 3.10+
+### Python 3.11+
 
 ```bash
 python3 --version
