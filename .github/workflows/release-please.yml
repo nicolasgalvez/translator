@@ -6,11 +6,11 @@ name: Release
 on:
   push:
     branches: [main]
-  # Lets a stuck release be retried. Without it the job below is only reachable
-  # from a releasable push, so a run that fails — as one did on a repo-permission
-  # error — leaves the release uncut until someone happens to land another
-  # feat/fix/perf commit.
-  workflow_dispatch:
+  # Keeps retries on the trusted default-branch workflow definition. Trigger with
+  # `gh api --method POST repos/nicolasgalvez/translator/dispatches \
+  #   -f event_type=release-retry`.
+  repository_dispatch:
+    types: [release-retry]
 
 permissions:
   contents: write
@@ -35,19 +35,20 @@ jobs:
     # several at once and the last one is often the chore. The final clause keeps
     # release-please's own release PR running — that merge is what tags the repo.
     #
-    # The workflow_dispatch clause must come first and short-circuit: a manual run
-    # carries no `commits` or `head_commit` in its payload, and a manual run is
+    # The repository_dispatch clause must come first and short-circuit: a retry
+    # carries no `commits` or `head_commit` in its payload, and a retry is
     # always deliberate, so it is never filtered.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'repository_dispatch' ||
       contains(join(github.event.commits.*.message, '||'), 'feat') ||
       contains(join(github.event.commits.*.message, '||'), 'fix') ||
       contains(join(github.event.commits.*.message, '||'), 'perf') ||
       contains(join(github.event.commits.*.message, '||'), '!:') ||
       startsWith(github.event.head_commit.message, 'chore(main): release')
     runs-on: ubuntu-latest
+    environment: release-automation
     steps:
-      - uses: googleapis/release-please-action@v5
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
         id: release
         with:
           config-file: release-please-config.json
@@ -58,14 +59,16 @@ jobs:
       # disagrees with the version it just bumped, and both CI jobs fail on
       # `uv sync --locked` — every release, needing a hand-written lock commit.
       #
-      # Pushing here cannot loop: this workflow triggers on pushes to main, and
-      # this pushes to the release branch.
-      - uses: actions/checkout@v7
+      # Candidate dependency metadata is processed without the deploy key. The
+      # key is introduced only for the final push, after candidate-derived work
+      # has finished.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: steps.release.outputs.pr
         with:
           ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         if: steps.release.outputs.pr
         with:
           enable-cache: true
@@ -76,14 +79,42 @@ jobs:
         run: |
           set -euo pipefail
           uv lock
-          # Commit only a real change, so a release needing no lock update does
-          # not leave an empty commit behind.
-          if git diff --quiet -- uv.lock; then
-            echo "uv.lock already matches the bumped version."
-            exit 0
-          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add uv.lock
-          git commit -m "chore: refresh uv.lock for the release"
-          git push
+          if git diff --cached --quiet; then
+            git commit --allow-empty -m "chore: trigger required CI for the release"
+          else
+            git commit -m "chore: refresh uv.lock for the release"
+          fi
+
+      - name: Prepare GitHub SSH host keys
+        if: steps.release.outputs.pr
+        run: |
+          set -euo pipefail
+          ssh_directory="$RUNNER_TEMP/release-ssh"
+          install -d -m 700 "$ssh_directory"
+          curl --fail --silent --show-error https://api.github.com/meta \
+            | jq -er '.ssh_keys[] | "github.com " + .' \
+            > "$ssh_directory/known_hosts"
+          test -s "$ssh_directory/known_hosts"
+          chmod 600 "$ssh_directory/known_hosts"
+
+      # This is the only step that receives the environment-scoped deploy key.
+      # A deploy-key push emits pull_request_target's synchronize event; a push
+      # made with GITHUB_TOKEN would be suppressed by GitHub's recursion guard.
+      - name: Push the release update and trigger required CI
+        if: steps.release.outputs.pr
+        env:
+          RELEASE_AUTOMATION_SSH_KEY: ${{ secrets.RELEASE_AUTOMATION_SSH_KEY }}
+          RELEASE_BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+        run: |
+          set -euo pipefail
+          : "${RELEASE_AUTOMATION_SSH_KEY:?release environment secret is empty}"
+          key_path="$RUNNER_TEMP/release-ssh/deploy-key"
+          trap 'rm -f "$key_path"' EXIT
+          umask 077
+          printf '%s\n' "$RELEASE_AUTOMATION_SSH_KEY" > "$key_path"
+          git remote set-url origin "git@github.com:${GITHUB_REPOSITORY}.git"
+          GIT_SSH_COMMAND="ssh -F /dev/null -i $key_path -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/release-ssh/known_hosts -o StrictHostKeyChecking=yes" \
+            git push origin "HEAD:refs/heads/$RELEASE_BRANCH"
