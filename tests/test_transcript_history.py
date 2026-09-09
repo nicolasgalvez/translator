@@ -7,8 +7,10 @@ import asyncio
 from io import BytesIO
 import importlib
 import json
+import os
 from pathlib import Path
 import threading
+import time
 
 import httpx
 import pytest
@@ -71,6 +73,52 @@ def test_history_reader_prefers_newest_sessions_and_discloses_partial_counts(tmp
     assert listing["transcripts"][1]["count"] == 1
     assert listing["transcripts"][1]["count_truncated"] is False
     assert listing["transcripts"][0]["label"] == "September 03, 2026 at 12:00 PM"
+
+
+def test_history_falls_back_for_an_invalid_new_format_timestamp(tmp_path):
+    stem = (
+        "2026-99-99_999999_999999Z--2026-99-99_999999_999999+0000-UTC"
+        "--0123456789abcdef"
+    )
+    write_session(tmp_path / f"{stem}.jsonl", ["preserved"])
+
+    listing = importlib.import_module("translator_runtime").TranscriptHistoryReader(
+        tmp_path, session_limit=2, entry_limit=2,
+    ).list_sessions()
+
+    assert listing["transcripts"][0]["label"] == stem
+
+
+def test_history_orders_mixed_session_formats_by_instant_east_of_utc(tmp_path):
+    legacy = tmp_path / "2026-09-09_120000.jsonl"
+    newer_stem = (
+        "2026-09-09_040000_000000Z--2026-09-09_130000_000000+0900-JST"
+        "--0123456789abcdef"
+    )
+    newer = tmp_path / f"{newer_stem}.jsonl"
+    write_session(legacy, ["legacy"])
+    write_session(newer, ["newer"])
+    original_timezone = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "Asia/Tokyo"
+        time.tzset()
+        listing = importlib.import_module("translator_runtime").TranscriptHistoryReader(
+            tmp_path, session_limit=2, entry_limit=2,
+        ).list_sessions()
+    finally:
+        if original_timezone is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original_timezone
+        time.tzset()
+
+    assert [item["filename"] for item in listing["transcripts"]] == [
+        newer.name, legacy.name,
+    ]
+    assert [item["label"] for item in listing["transcripts"]] == [
+        "September 09, 2026 at 01:00 PM JST (UTC+09:00)",
+        "September 09, 2026 at 12:00 PM",
+    ]
 
 
 def test_history_listing_skips_malformed_records_and_counts_valid_entries(tmp_path):

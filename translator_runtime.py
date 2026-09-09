@@ -11,7 +11,6 @@ import time
 import uuid
 import wave
 from contextlib import contextmanager, suppress
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -29,11 +28,12 @@ from caption_jobs import CaptionJobManager
 from caption_translation import CaptionTranslationPolicy
 from plugin_loader import load_plugins
 from runtime_config import RuntimeConfig
+from session_files import LiveSessionFiles
 from transcript_events import process_transcript_text, queue_transcript_render_event
 from transcript_history import TranscriptHistoryReader
 from websocket_security import WebSocketOriginPolicy
 from websocket_delivery import WebSocketDeliveryRegistry
-from wav_recorder import RecordingError, RotatingWavRecorder
+from wav_recorder import RecordingError, RotatingWavRecorder  # pylint: disable=unused-import
 
 if TYPE_CHECKING:
     import numpy as np
@@ -107,13 +107,12 @@ class TranslatorRuntime:
             self.captions_dir.mkdir(exist_ok=True)
             await asyncio.to_thread(self.caption_manager.sweep)
             self.caption_manager.start()
-            session_stem = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-            self.transcript_file = self.transcripts_dir / f"{session_stem}.jsonl"
-            self.audio_file = self.transcripts_dir / f"{session_stem}.wav"
+            session_files = LiveSessionFiles.reserve(self.transcripts_dir)
+            self.transcript_file = session_files.transcript_path
+            self.audio_file = session_files.audio_path
             print(f"Transcript auto-saving to: {self.transcript_file}", flush=True)
-            self.transcript_file.touch(exist_ok=True)
-            self.audio_recorder = RotatingWavRecorder(
-                self.transcripts_dir, session_stem, self.config.recording_storage_bytes,
+            self.audio_recorder = session_files.create_audio_recorder(
+                self.config.recording_storage_bytes,
             )
             try:
                 self.audio_recorder.open()

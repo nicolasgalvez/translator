@@ -2,6 +2,7 @@
 
 import importlib
 import os
+from pathlib import Path
 import wave
 
 import pytest
@@ -164,9 +165,9 @@ def test_recorder_removes_an_incomplete_file_when_open_fails(tmp_path, monkeypat
     module = importlib.import_module("wav_recorder")
     part = tmp_path / "2026-09-09_120000.wav"
 
-    def fail_after_creating(filename, _mode):
+    def fail_after_creating(stream, _mode):
         part.write_bytes(b"incomplete header")
-        assert filename == str(part)
+        assert Path(stream.name) == part
         raise PermissionError("storage unavailable")
 
     monkeypatch.setattr(module.wave, "open", fail_after_creating)
@@ -195,8 +196,8 @@ def test_recorder_removes_a_partial_file_when_wave_setup_and_close_fail(
         def close(self):
             raise OSError("partial close failed")
 
-    def open_partial(filename, _mode):
-        assert filename == str(part)
+    def open_partial(stream, _mode):
+        assert Path(stream.name) == part
         part.write_bytes(b"partial header")
         return FailedWave()
 
@@ -388,3 +389,65 @@ def test_recorder_never_opens_an_active_part_through_a_symlink(tmp_path):
     assert recorder.enabled is False
     assert active.is_symlink()
     assert outside.read_bytes() == b"private audio"
+
+
+def test_recorder_never_truncates_an_existing_first_part(tmp_path):
+    module = importlib.import_module("wav_recorder")
+    existing = tmp_path / "2026-09-09_120000.wav"
+    existing.write_bytes(b"existing recording")
+    recorder = module.RotatingWavRecorder(
+        tmp_path, "2026-09-09_120000", storage_budget_bytes=1024,
+    )
+
+    with pytest.raises(module.RecordingError, match="open failed"):
+        recorder.open()
+
+    assert recorder.enabled is False
+    assert existing.read_bytes() == b"existing recording"
+
+
+def test_recorder_never_truncates_an_existing_rotated_part(tmp_path):
+    module = importlib.import_module("wav_recorder")
+    stem = "2026-09-09_120000"
+    first = tmp_path / f"{stem}.wav"
+    existing = tmp_path / f"{stem}.part002.wav"
+    existing.write_bytes(b"existing second part")
+    recorder = module.RotatingWavRecorder(
+        tmp_path, stem, storage_budget_bytes=1024, part_data_limit=2,
+    )
+    recorder.write(b"\x01\x00")
+
+    with pytest.raises(module.RecordingError, match="write failed"):
+        recorder.write(b"\x02\x00")
+
+    recorder.close()
+    assert read_wav(first)[1] == b"\x01\x00"
+    assert existing.read_bytes() == b"existing second part"
+
+
+def test_recorder_rejects_a_replacement_for_its_reserved_first_part(tmp_path):
+    session_module = importlib.import_module("session_files")
+    recorder_module = importlib.import_module("wav_recorder")
+    files = session_module.LiveSessionFiles.reserve(tmp_path)
+    files.audio_path.unlink()
+    files.audio_path.write_bytes(b"replacement recording")
+    recorder = files.create_audio_recorder(storage_budget_bytes=1024)
+
+    with pytest.raises(recorder_module.RecordingError, match="reserved audio"):
+        recorder.open()
+
+    recorder.close()
+    assert files.audio_path.read_bytes() == b"replacement recording"
+
+
+def test_reserved_empty_audio_is_removed_when_recording_cannot_start(tmp_path):
+    session_module = importlib.import_module("session_files")
+    recorder_module = importlib.import_module("wav_recorder")
+    files = session_module.LiveSessionFiles.reserve(tmp_path)
+    recorder = files.create_audio_recorder(storage_budget_bytes=1)
+
+    with pytest.raises(recorder_module.RecordingStorageError, match="storage budget"):
+        recorder.open()
+
+    assert files.transcript_path.is_file()
+    assert not files.audio_path.exists()

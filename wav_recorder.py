@@ -1,8 +1,10 @@
 """Bounded, rotating PCM WAV recording for one live transcript session."""
 
 from contextlib import suppress
+import os
 from pathlib import Path
 import re
+import stat
 import wave
 
 
@@ -33,6 +35,7 @@ class RotatingWavRecorder:
     def __init__(
         self, directory: Path, session_stem: str, storage_budget_bytes: int,
         part_data_limit: int | None = None,
+        *, first_part_stream=None,
     ):
         self.directory = directory
         self.session_stem = session_stem
@@ -48,7 +51,9 @@ class RotatingWavRecorder:
         self._part_number = 1
         self._written_bytes = 0
         self._writer = None
-        self._current_part_created = False
+        self._stream = first_part_stream
+        self._current_part_created = first_part_stream is not None
+        self._current_part_identity = None
         self._closed = False
         self._enabled = True
 
@@ -118,12 +123,24 @@ class RotatingWavRecorder:
         root = self.directory.resolve()
         if part_path.is_symlink() or part_path.parent.resolve() != root:
             raise RecordingError("Refusing unsafe recording path")
-        if part_path.exists() and self._safe_regular_file(root, part_path) is None:
+        if (part_path.exists() or part_path.is_symlink()) and self._safe_regular_file(
+            root, part_path,
+        ) is None:
             raise RecordingError("Refusing unsafe recording path")
-        existed = part_path.exists() or part_path.is_symlink()
         writer = None
+        stream = self._stream
+        part_identity = None
         try:
-            writer = wave.open(str(part_path), "wb")
+            if stream is not None:
+                part_identity = self._stream_path_identity(stream, part_path)
+                if part_identity is None:
+                    raise RecordingError("Refusing a replaced reserved audio path")
+            else:
+                stream = part_path.open("xb")
+                part_identity = self._stream_path_identity(stream, part_path)
+                if part_identity is None:
+                    raise RecordingError("Refusing unsafe recording path")
+            writer = wave.open(stream, "wb")
             writer.setnchannels(self._CHANNELS)
             writer.setsampwidth(self._SAMPLE_WIDTH)
             writer.setframerate(self._SAMPLE_RATE)
@@ -131,34 +148,63 @@ class RotatingWavRecorder:
             if writer is not None:
                 with suppress(Exception):
                     writer.close()
-            if not existed and not part_path.is_symlink():
-                with suppress(OSError):
-                    part_path.unlink(missing_ok=True)
+            if stream is not None:
+                with suppress(Exception):
+                    stream.close()
+                self._remove_owned_path(part_path, part_identity)
+            self._stream = None
+            self._current_part_created = False
+            self._current_part_identity = None
             raise
         self._writer = writer
-        self._current_part_created = not existed
+        self._stream = stream
+        self._current_part_created = True
+        self._current_part_identity = part_identity
 
     def _close_writer(self) -> None:
         writer, self._writer = self._writer, None
+        stream, self._stream = self._stream, None
         self._current_part_created = False
+        self._current_part_identity = None
+        error = None
         if writer is not None:
-            writer.close()
+            try:
+                writer.close()
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                error = exc
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                if error is None:
+                    error = exc
+        if error is not None:
+            raise error
 
     def _discard_unconfirmed_part(self) -> None:
         part_path = self._part_path()
         writer, self._writer = self._writer, None
+        stream, self._stream = self._stream, None
         created, self._current_part_created = self._current_part_created, False
+        identity, self._current_part_identity = self._current_part_identity, None
+        if created and identity is None and stream is not None:
+            identity = self._stream_path_identity(stream, part_path)
         if writer is not None:
             with suppress(Exception):
                 writer.close()
+        if stream is not None:
+            with suppress(Exception):
+                stream.close()
         if created:
-            with suppress(OSError):
-                part_path.unlink(missing_ok=True)
+            self._remove_owned_path(part_path, identity)
 
     def _disable(self) -> None:
         self._enabled = False
         with suppress(Exception):
-            self._close_writer()
+            if self._writer is None and self._current_part_created:
+                self._discard_unconfirmed_part()
+            else:
+                self._close_writer()
 
     def _ensure_capacity(self, additional_bytes: int) -> None:
         groups, retained_bytes = self._managed_groups()
@@ -235,6 +281,29 @@ class RotatingWavRecorder:
         except (OSError, RuntimeError, ValueError):
             pass
         return None
+
+    @staticmethod
+    def _stream_path_identity(stream, path: Path) -> tuple[int, int] | None:
+        try:
+            opened = os.fstat(stream.fileno())
+            current = path.stat(follow_symlinks=False)
+        except (OSError, ValueError):
+            return None
+        identity = opened.st_dev, opened.st_ino
+        if stat.S_ISREG(current.st_mode) and identity == (current.st_dev, current.st_ino):
+            return identity
+        return None
+
+    @staticmethod
+    def _remove_owned_path(path: Path, identity: tuple[int, int] | None) -> None:
+        if identity is None:
+            return
+        try:
+            current = path.stat(follow_symlinks=False)
+            if (current.st_dev, current.st_ino) == identity:
+                path.unlink()
+        except OSError:
+            pass
 
     @staticmethod
     def _delete_group(paths) -> None:
