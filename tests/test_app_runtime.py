@@ -145,6 +145,7 @@ def test_caption_sweep_removes_only_old_generated_orphans(tmp_path):
 
 def test_caption_and_live_backend_calls_are_serialized_including_lazy_segments(tmp_path):
     module = importlib.import_module("translator_runtime")
+    importlib.import_module("scipy.signal")
     active = 0
     maximum = 0
     lock = threading.Lock()
