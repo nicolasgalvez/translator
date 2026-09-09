@@ -107,6 +107,8 @@ describe("caption status and focus", () => {
       return 1
     })
     window.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
       json: async () => ({
         status: "processing",
         progress: 42,
@@ -140,6 +142,115 @@ describe("caption status and focus", () => {
     await Promise.resolve()
     observer.disconnect()
     expect(repeatedAnnouncements).toHaveLength(0)
+  })
+
+  it("stops polling and explains when the caption job is gone", async () => {
+    const { window } = createPage()
+    let poll
+    window.setInterval = vi.fn((callback) => {
+      poll = callback
+      return 17
+    })
+    window.clearInterval = vi.fn()
+    window.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+      json: async () => ({ error: "Job not found" }),
+    })
+
+    window.pollStatus("missing-job")
+    await poll()
+
+    expect(window.clearInterval).toHaveBeenCalledWith(17)
+    expect(getByRole(window.document.body, "alert")).toHaveTextContent(
+      /caption status request failed.*process the video again/i,
+    )
+    expect(
+      getByRole(window.document.body, "progressbar", { hidden: true }),
+    ).not.toBeVisible()
+  })
+
+  it("stops polling before reading a failed status response body", async () => {
+    const { window } = createPage()
+    let poll
+    window.setInterval = vi.fn((callback) => {
+      poll = callback
+      return 19
+    })
+    window.clearInterval = vi.fn()
+    window.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: () => new Promise(() => {}),
+    })
+
+    window.pollStatus("stalled-error-body")
+    void poll()
+
+    await vi.waitFor(() => {
+      expect(window.clearInterval).toHaveBeenCalledWith(19)
+    })
+    expect(getByRole(window.document.body, "alert")).toHaveTextContent(
+      /caption status request failed.*process the video again/i,
+    )
+  })
+
+  it("does not read a failed response body that can outlive a reset", async () => {
+    const { window } = createPage()
+    let poll
+    let resolveBody
+    const body = new Promise((resolve) => {
+      resolveBody = resolve
+    })
+    window.setInterval = vi.fn((callback) => {
+      poll = callback
+      return 21
+    })
+    window.clearInterval = vi.fn()
+    const readBody = vi.fn(() => body)
+    window.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+      json: readBody,
+    })
+
+    window.pollStatus("old-job")
+    const pendingPoll = poll()
+    await vi.waitFor(() => {
+      expect(window.clearInterval).toHaveBeenCalledWith(21)
+    })
+    window.resetForm()
+    resolveBody({ error: "Late old-job failure" })
+    await pendingPoll
+
+    expect(readBody).not.toHaveBeenCalled()
+    expect(queryByRole(window.document.body, "alert")).toBeNull()
+    expect(window.document.activeElement).toBe(
+      getByRole(window.document.body, "button", { name: "Upload a video" }),
+    )
+  })
+
+  it("stops polling when a successful status response is incomplete", async () => {
+    const { window } = createPage()
+    let poll
+    window.setInterval = vi.fn((callback) => {
+      poll = callback
+      return 23
+    })
+    window.clearInterval = vi.fn()
+    window.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ status: "processing" }),
+    })
+
+    window.pollStatus("damaged-job")
+    await poll()
+
+    expect(window.clearInterval).toHaveBeenCalledWith(23)
+    expect(getByRole(window.document.body, "alert")).toHaveTextContent(
+      /invalid caption status/i,
+    )
   })
 
   it("announces and focuses errors", () => {
