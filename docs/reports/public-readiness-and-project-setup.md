@@ -4,6 +4,8 @@ Status date: September 9, 2026
 
 Tracking issue: [TRAN-71](https://procyoncreative.atlassian.net/browse/TRAN-71)
 
+Delivery: [pull request #81](https://github.com/nicolasgalvez/translator/pull/81)
+
 ## Result
 
 The repository is ready to remain public. The current tree and the complete
@@ -54,5 +56,6 @@ uv run --only-group dev pre-commit run --all-files
 git hook run commit-msg -- <message-file>
 ```
 
-The main ruleset readback and pull request run are recorded on the delivery pull
-request because their final identifiers exist only after the branch is pushed.
+The delivery pull request completed Pylint, Pytest, project-policy, and `required`
+successfully. Ruleset `22227639` was then read back as active with no bypass
+actors and `required` pinned to the GitHub Actions integration (`15368`).
