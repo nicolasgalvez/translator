@@ -39,6 +39,9 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
 
+      - name: Check the public build context
+        run: ./scripts/check-public-context.sh
+
       - name: Lint the Dockerfile
         run: docker build --check .
 
