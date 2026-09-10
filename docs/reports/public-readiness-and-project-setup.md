@@ -2,16 +2,22 @@
 
 Status date: September 9, 2026
 
-Tracking issue: [TRAN-71](https://procyoncreative.atlassian.net/browse/TRAN-71)
+Tracking issues:
+[TRAN-71](https://procyoncreative.atlassian.net/browse/TRAN-71),
+[TRAN-73](https://procyoncreative.atlassian.net/browse/TRAN-73), and
+[TRAN-74](https://procyoncreative.atlassian.net/browse/TRAN-74)
 
-Delivery: [pull request #81](https://github.com/nicolasgalvez/translator/pull/81)
+Delivery pull requests:
+[#81](https://github.com/nicolasgalvez/translator/pull/81),
+[#82](https://github.com/nicolasgalvez/translator/pull/82), and
+[#83](https://github.com/nicolasgalvez/translator/pull/83) (all merged)
 
 ## Result
 
 The repository is ready to remain public. The current tree and the complete
-reachable history passed secret scanning. Local commit policy is now repository-owned, and
-the pull request workflow exposes an always-present `required` gate for the main
-branch ruleset.
+reachable history passed secret scanning. Local commit policy is now
+repository-owned, and the pull request workflow exposes an always-present
+`required` gate for the main branch ruleset.
 
 ## Public-readiness checks
 
@@ -70,6 +76,13 @@ uv run --only-group dev pre-commit run --all-files
 git hook run commit-msg -- <message-file>
 ```
 
-The delivery pull request completed Pylint, Pytest, project-policy, and `required`
-successfully. Ruleset `22227639` was then read back as active with no bypass
-actors and `required` pinned to the GitHub Actions integration (`15368`).
+The local pre-commit command runs the repository's configured Gitleaks hook.
+In CI, the Official Gitleaks action separately scans the candidate repository
+and pull request history while the other pre-commit checks run with Gitleaks
+skipped.
+
+All three delivery pull requests are merged. Each completed Pylint, Pytest,
+project-policy, and `required` successfully. After #83 merged, the
+[main-branch CI run](https://github.com/nicolasgalvez/translator/actions/runs/34440599080)
+also completed successfully. Ruleset `22227639` was read back as active with no
+bypass actors and `required` pinned to the GitHub Actions integration (`15368`).
