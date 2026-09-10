@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import json
 import uuid
-from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from hooks import apply_filters, do_action
 
@@ -26,7 +25,6 @@ def process_transcript_text(
     *,
     context: dict[str, Any] | None = None,
     now: datetime | None = None,
-    commit_guard: Callable[[], AbstractContextManager[bool]] | None = None,
 ) -> dict[str, Any] | None:
     stripped = text.strip()
     if not stripped:
@@ -39,13 +37,8 @@ def process_transcript_text(
     if not event or not event.get("text"):
         return None
 
-    serialized = json.dumps(event) + "\n"
-    # Callbacks run outside the guard so shutdown never waits on plugin code.
-    with commit_guard() if commit_guard else nullcontext(True) as allowed:
-        if not allowed:
-            return None
-        with open(transcript_file, "a", encoding="utf-8") as f:
-            f.write(serialized)
+    with open(transcript_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(event) + "\n")
 
     do_action("transcript.after_save", event, hook_context)
 
@@ -61,10 +54,6 @@ def queue_transcript_render_event(
     output_queue: Any,
     *,
     context: dict[str, Any] | None = None,
-    commit_guard: Callable[[], AbstractContextManager[bool]] | None = None,
 ) -> None:
-    with commit_guard() if commit_guard else nullcontext(True) as allowed:
-        if not allowed:
-            return
-        output_queue.put(render_event)
+    output_queue.put(render_event)
     do_action("transcript.after_render", render_event, context or {})

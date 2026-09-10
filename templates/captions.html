@@ -34,38 +34,23 @@
         .container { max-width: 600px; margin: 2rem auto; padding: 0 1.5rem; }
 
         .upload-area {
-            display: block;
-            width: 100%;
             border: 2px dashed #0f3460;
             border-radius: 12px;
             padding: 3rem 2rem;
             text-align: center;
             cursor: pointer;
             transition: border-color 0.2s, background 0.2s;
-            background: transparent;
-            color: inherit;
-            font: inherit;
         }
         .upload-area:hover, .upload-area.dragover {
             border-color: #e94560;
             background: rgba(233, 69, 96, 0.05);
         }
-        .upload-title {
-            display: block;
-            font-size: 1.1rem;
-            font-weight: 600;
-            color: #e94560;
-            margin-bottom: 0.5rem;
-        }
-        .upload-description { display: block; font-size: 0.85rem; color: #888; }
-        .file-input { display: none; }
-
-        .upload-area:focus-visible, .reset-button:focus-visible {
-            outline: 3px solid #a0c4ff;
-            outline-offset: 3px;
-        }
+        .upload-area h2 { font-size: 1.1rem; color: #e94560; margin-bottom: 0.5rem; }
+        .upload-area p { font-size: 0.85rem; color: #888; }
+        .upload-area input { display: none; }
 
         .progress-section {
+            display: none;
             margin-top: 2rem;
         }
         .progress-bar-bg {
@@ -89,6 +74,7 @@
         }
 
         .download-section {
+            display: none;
             margin-top: 2rem;
         }
         .download-list {
@@ -124,6 +110,7 @@
             margin-bottom: 1rem;
         }
         .error-message {
+            display: none;
             margin-top: 2rem;
             padding: 1rem;
             background: rgba(233, 69, 96, 0.1);
@@ -133,21 +120,18 @@
             font-size: 0.9rem;
             text-align: center;
         }
-        .reset-action {
+        .reset-link {
+            display: none;
             margin-top: 1.5rem;
             text-align: center;
         }
-        .reset-button {
+        .reset-link a {
             color: #a0c4ff;
-            background: transparent;
-            border: 0;
-            padding: 0;
             text-decoration: none;
             font-size: 0.85rem;
-            font-family: inherit;
             cursor: pointer;
         }
-        .reset-button:hover { text-decoration: underline; }
+        .reset-link a:hover { text-decoration: underline; }
     </style>
 </head>
 <body>
@@ -158,34 +142,28 @@
         <a class="nav-link" href="/history">History</a>
     </header>
     <div class="container">
-        <button type="button" class="upload-area" id="upload-area"
-                aria-labelledby="upload-title" aria-describedby="upload-description">
-            <span class="upload-title" id="upload-title">Upload a video</span>
-            <span class="upload-description" id="upload-description">Drop a video file here or click to browse</span>
-        </button>
-        <input class="file-input" type="file" id="file-input" accept="video/*,audio/*">
-
-        <div class="progress-section" id="progress-section" hidden>
-            <div class="progress-bar-bg">
-                <div class="progress-bar-fill" id="progress-bar" role="progressbar"
-                     aria-label="Caption processing progress" aria-valuemin="0"
-                     aria-valuemax="100" aria-valuenow="0"></div>
-            </div>
-            <div class="progress-message" id="progress-message" role="status"
-                 aria-live="polite" aria-atomic="true">Starting...</div>
+        <div class="upload-area" id="upload-area">
+            <h2>Upload a video</h2>
+            <p>Drop a video file here or click to browse</p>
+            <input type="file" id="file-input" accept="video/*,audio/*">
         </div>
 
-        <div class="error-message" id="error-message" role="alert"
-             aria-atomic="true" tabindex="-1" hidden></div>
+        <div class="progress-section" id="progress-section">
+            <div class="progress-bar-bg">
+                <div class="progress-bar-fill" id="progress-bar"></div>
+            </div>
+            <div class="progress-message" id="progress-message">Starting...</div>
+        </div>
 
-        <div class="download-section" id="download-section" role="region"
-             aria-label="Caption downloads" tabindex="-1" hidden>
+        <div class="error-message" id="error-message"></div>
+
+        <div class="download-section" id="download-section">
             <div class="detected-lang" id="detected-lang"></div>
             <div class="download-list" id="download-list"></div>
         </div>
 
-        <div class="reset-action" id="reset-action" hidden>
-            <button class="reset-button" id="reset-button" type="button">Process another video</button>
+        <div class="reset-link" id="reset-link">
+            <a onclick="resetForm()">Process another video</a>
         </div>
     </div>
 
@@ -199,11 +177,9 @@
         const downloadList = document.getElementById('download-list');
         const detectedLang = document.getElementById('detected-lang');
         const errorMessage = document.getElementById('error-message');
-        const resetAction = document.getElementById('reset-action');
-        const resetButton = document.getElementById('reset-button');
+        const resetLink = document.getElementById('reset-link');
 
         uploadArea.addEventListener('click', () => fileInput.click());
-        resetButton.addEventListener('click', resetForm);
         fileInput.addEventListener('change', (e) => {
             if (e.target.files.length) uploadFile(e.target.files[0]);
         });
@@ -222,8 +198,8 @@
         });
 
         async function uploadFile(file) {
-            uploadArea.hidden = true;
-            progressSection.hidden = false;
+            uploadArea.style.display = 'none';
+            progressSection.style.display = 'block';
             progressMessage.textContent = 'Uploading...';
 
             const formData = new FormData();
@@ -243,34 +219,10 @@
             const interval = setInterval(async () => {
                 try {
                     const resp = await fetch(`/captions/status/${jobId}`);
-
-                    if (!resp.ok) {
-                        clearInterval(interval);
-                        showError('Caption status request failed. Please process the video again.');
-                        return;
-                    }
                     const job = await resp.json();
-                    const validStatus = ['queued', 'processing', 'done', 'error']
-                        .includes(job && job.status);
-                    const validProgress = Number.isFinite(job && job.progress)
-                        && job.progress >= 0 && job.progress <= 100;
-                    const validMessage = job && typeof job.message === 'string';
-                    const validFiles = job && (
-                        job.status !== 'done'
-                        || Array.isArray(job.files)
-                            && job.files.every(filename => typeof filename === 'string')
-                    );
-                    if (!validStatus || !validProgress || !validMessage || !validFiles) {
-                        clearInterval(interval);
-                        showError('Invalid caption status response. Please process the video again.');
-                        return;
-                    }
 
                     progressBar.style.width = job.progress + '%';
-                    progressBar.setAttribute('aria-valuenow', String(job.progress));
-                    if (progressMessage.textContent !== job.message) {
-                        progressMessage.textContent = job.message;
-                    }
+                    progressMessage.textContent = job.message;
 
                     if (job.status === 'done') {
                         clearInterval(interval);
@@ -287,10 +239,9 @@
         }
 
         function showDownloads(jobId, job) {
-            progressSection.hidden = true;
-            errorMessage.hidden = true;
-            downloadSection.hidden = false;
-            resetAction.hidden = false;
+            progressSection.style.display = 'none';
+            downloadSection.style.display = 'block';
+            resetLink.style.display = 'block';
 
             const lang = job.detected_language || 'unknown';
             detectedLang.textContent = `Detected: ${lang}`;
@@ -313,32 +264,23 @@
                 a.appendChild(badge);
                 downloadList.appendChild(a);
             }
-            downloadSection.focus();
         }
 
         function showError(msg) {
-            progressSection.hidden = true;
-            downloadSection.hidden = true;
-            errorMessage.hidden = false;
+            progressSection.style.display = 'none';
+            errorMessage.style.display = 'block';
             errorMessage.textContent = msg;
-            resetAction.hidden = false;
-            errorMessage.focus();
+            resetLink.style.display = 'block';
         }
 
         function resetForm() {
-            uploadArea.hidden = false;
-            progressSection.hidden = true;
-            downloadSection.hidden = true;
-            errorMessage.hidden = true;
-            resetAction.hidden = true;
+            uploadArea.style.display = '';
+            progressSection.style.display = 'none';
+            downloadSection.style.display = 'none';
+            errorMessage.style.display = 'none';
+            resetLink.style.display = 'none';
             progressBar.style.width = '0%';
-            progressBar.setAttribute('aria-valuenow', '0');
-            progressMessage.textContent = 'Starting...';
-            downloadList.replaceChildren();
-            detectedLang.textContent = '';
-            errorMessage.textContent = '';
             fileInput.value = '';
-            uploadArea.focus();
         }
     </script>
 </body>

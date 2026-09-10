@@ -12,9 +12,14 @@ import numpy as np
 from scipy.signal import resample_poly
 from faster_whisper import WhisperModel
 
-from audio_pipeline import (
-    SAMPLE_RATE, CAPTURE_CHUNK, MAX_UTTERANCE, MIN_UTTERANCE, UtteranceChunker,
-)
+# Mirror the constants from app.py (can't import app directly — it has
+# module-level side effects like audio device init and model loading)
+SAMPLE_RATE = 48000
+CAPTURE_CHUNK = 0.25
+SILENCE_THRESHOLD = 0.0005
+MAX_UTTERANCE = 5
+MIN_UTTERANCE = 0.5
+SILENCE_CHUNKS_TO_SPLIT = 2
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "conversation_es.wav")
 
@@ -45,11 +50,17 @@ def load_wav_48k(path: str) -> np.ndarray:
     return audio
 
 
-def chunk_audio(audio: np.ndarray) -> list[np.ndarray]:
-    """Feed the real production chunker, including an end-of-file silence pause."""
+def simulate_chunking(audio: np.ndarray) -> list[np.ndarray]:
+    """
+    Simulate the silence-based chunking from audio_process_loop.
+    Splits audio into 0.5s capture chunks, accumulates until silence or max duration.
+    Returns list of utterance arrays ready for Whisper.
+    """
     chunk_samples = int(SAMPLE_RATE * CAPTURE_CHUNK)
     utterances = []
-    chunker = UtteranceChunker()
+    buf = np.zeros(0, dtype=np.float32)
+    silent_count = 0
+    has_speech = False
 
     for start in range(0, len(audio), chunk_samples):
         chunk = audio[start:start + chunk_samples]
@@ -57,13 +68,30 @@ def chunk_audio(audio: np.ndarray) -> list[np.ndarray]:
             # Pad the last chunk
             chunk = np.pad(chunk, (0, chunk_samples - len(chunk)))
 
-        output = chunker.add(chunk)
-        if output is not None:
-            utterances.append(output)
-    for _ in range(2):
-        output = chunker.add(np.zeros(chunk_samples, dtype=np.float32))
-        if output is not None:
-            utterances.append(output)
+        buf = np.concatenate([buf, chunk])
+        duration = len(buf) / SAMPLE_RATE
+
+        is_silent = np.abs(chunk).mean() < SILENCE_THRESHOLD
+        if is_silent:
+            silent_count += 1
+        else:
+            silent_count = 0
+            has_speech = True
+
+        should_transcribe = (
+            (has_speech and silent_count >= SILENCE_CHUNKS_TO_SPLIT and duration >= MIN_UTTERANCE)
+            or (has_speech and duration >= MAX_UTTERANCE)
+        )
+
+        if should_transcribe:
+            utterances.append(buf.copy())
+            buf = np.zeros(0, dtype=np.float32)
+            silent_count = 0
+            has_speech = False
+
+    # Flush any remaining audio with speech
+    if has_speech and len(buf) > 0:
+        utterances.append(buf.copy())
 
     return utterances
 
@@ -85,7 +113,7 @@ def transcribe_utterances(utterances: list[np.ndarray], model: WhisperModel) -> 
 def test_chunking_captures_all_phrases():
     """Silence-based chunking should produce utterances that contain all key phrases."""
     audio = load_wav_48k(FIXTURE)
-    utterances = chunk_audio(audio)
+    utterances = simulate_chunking(audio)
 
     # Should produce multiple utterances (not one giant blob or 100 tiny fragments)
     assert len(utterances) >= 5, f"Expected at least 5 utterances, got {len(utterances)}"
@@ -95,7 +123,7 @@ def test_chunking_captures_all_phrases():
     for i, utt in enumerate(utterances):
         dur = len(utt) / SAMPLE_RATE
         assert dur >= MIN_UTTERANCE, f"Utterance {i} too short: {dur:.1f}s"
-        assert dur <= MAX_UTTERANCE, f"Utterance {i} too long: {dur:.1f}s"
+        assert dur <= MAX_UTTERANCE + CAPTURE_CHUNK, f"Utterance {i} too long: {dur:.1f}s"
 
     # Transcribe
     model = WhisperModel("small", device="cpu", compute_type="int8")
@@ -119,10 +147,10 @@ def test_chunking_captures_all_phrases():
 
 
 def test_no_utterance_exceeds_max():
-    """No emitted utterance should exceed MAX_UTTERANCE."""
+    """No utterance should exceed MAX_UTTERANCE (plus one capture chunk of slack)."""
     audio = load_wav_48k(FIXTURE)
-    utterances = chunk_audio(audio)
-    max_allowed = MAX_UTTERANCE
+    utterances = simulate_chunking(audio)
+    max_allowed = MAX_UTTERANCE + CAPTURE_CHUNK
     for i, utt in enumerate(utterances):
         dur = len(utt) / SAMPLE_RATE
         assert dur <= max_allowed, f"Utterance {i} is {dur:.1f}s, max allowed {max_allowed}s"

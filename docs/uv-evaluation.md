@@ -1,11 +1,10 @@
-# Why this project adopted uv
+# Should this project adopt uv?
 
-**Decision: adopted.** The one thing that could have blocked it — expressing
+**Recommendation: adopt.** The one thing that could have blocked it — expressing
 Apple-Silicon-only `mlx-whisper` alongside three different torch builds from two
 private indexes, in a single lockfile — works. It is verified below, not assumed.
 
-The repository now uses this design. This document records the evidence behind
-that choice and its current dependency-source contract.
+Adoption is a separate ticket. This document is the evidence for taking it.
 
 ## The crux: platform- and index-conditional dependencies
 
@@ -19,7 +18,7 @@ The project needs one dependency set to resolve three ways:
 
 This is the whole question. If uv cannot express it, nothing else matters.
 
-**It can.** This `pyproject.toml` produces one `uv.lock` — 148 packages — that
+**It can.** This `pyproject.toml` produces one `uv.lock` — 146 packages — that
 resolves correctly for all three:
 
 ```toml
@@ -28,7 +27,7 @@ mlx = ["mlx-whisper; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 # torch is transitive (argostranslate -> stanza -> torch), but it must be named
 # directly for tool.uv.sources to apply to it at all.
 cpu = ["torch; sys_platform == 'linux'"]
-cuda = ["torch>=2.14.0; sys_platform == 'linux'"]
+cuda = ["torch; sys_platform == 'linux'"]
 
 [tool.uv]
 environments = [
@@ -46,7 +45,7 @@ explicit = true
 
 [[tool.uv.index]]
 name = "pytorch-cuda"
-url = "https://download.pytorch.org/whl/cu126"
+url = "https://download.pytorch.org/whl/cu124"
 explicit = true
 
 [tool.uv.sources]
@@ -61,15 +60,15 @@ Resulting lock entries:
 ```
 torch 2.14.0       -> https://pypi.org/simple                     (macOS)
 torch 2.14.0+cpu   -> https://download.pytorch.org/whl/cpu        (CI)
-torch 2.14.0+cu126 -> https://download.pytorch.org/whl/cu126      (Docker)
+torch 2.6.0+cu124  -> https://download.pytorch.org/whl/cu124      (Docker)
 mlx-whisper 0.4.3  -> https://pypi.org/simple, darwin/arm64 only
 ```
 
 ### Three things that had to be discovered by trying
 
-Each of these produced a silent wrong answer or an unhelpful error during the
-original evaluation. Recording them keeps future dependency changes from
-reintroducing the same source-selection mistakes.
+Each of these produced a silent wrong answer or an unhelpful error first. They
+are the reason this ticket was worth doing before the migration rather than
+during it.
 
 **1. A source on a transitive dependency is silently ignored.** The obvious
 first attempt declares `[tool.uv.sources] torch = {index = "pytorch-cpu"}`
@@ -92,8 +91,7 @@ correct key is `environments`, which restricts resolution instead of demanding i
 
 ## Speed
 
-Measured during the original evaluation on the former `requirements-dev.txt`,
-cold cache, same machine:
+Measured on this project's `requirements-dev.txt`, cold cache, same machine:
 
 | | real | user |
 |---|---|---|
@@ -103,49 +101,52 @@ cold cache, same machine:
 About 5x, on the small dependency group.
 
 **This number is honest but narrow, and should not be extrapolated.** The dev
-group was three pure-Python packages. The number does not measure current CI or
-the complete locked application graph, so it should not be used as a current
-end-to-end benchmark.
+group is three pure-Python packages. CI's slow job is `pylint`, which installs
+all of `requirements.txt` plus torch and currently takes ~60s; that time is
+dominated by downloading hundreds of megabytes, where a faster resolver helps
+proportionally far less. A full before-and-after on the real CI jobs was not
+measured and should be part of the migration ticket, not assumed from the number
+above.
 
-The more valuable property is not speed. It is the committed lockfile, which now
-makes the supported installs reproducible.
+The more valuable property is not speed. It is the lockfile: there is currently
+no lockfile at all, so no two installs are guaranteed identical.
 
-## What this replaced
+## What this replaces
 
-- `requirements.txt`, `requirements-dev.txt`, and `requirements-mlx.txt` became
-  one `pyproject.toml` plus a committed `uv.lock`. The platform-specific MLX
-  dependency is now an extra.
-- `run.sh`'s venv bootstrap and `pip install` step became `uv run`, which creates
+- `requirements.txt`, `requirements-dev.txt`, `requirements-mlx.txt` become one
+  `pyproject.toml` plus a committed `uv.lock`. The mlx file, which today exists
+  only to bolt one platform-specific package onto a `-r` include, becomes an extra.
+- `run.sh`'s venv bootstrap and `pip install` step become `uv run`, which creates
   and syncs the environment on demand.
 
 ## `conftest.py`
 
-The former root `conftest.py` existed only because the repository had no project
-file in which to configure `pythonpath`. `pyproject.toml` now contains the
-idiomatic configuration:
+The root `conftest.py` from TRAN-2 exists **only** because the repo had no project
+file to put `pythonpath` in. Adding `pyproject.toml` makes the idiomatic fix
+available:
 
 ```toml
 [tool.pytest.ini_options]
 pythonpath = ["."]
 ```
 
-The migration made that swap and removed `conftest.py`.
+The migration should make that swap and delete `conftest.py`. It is the same fix,
+declared where a reader expects to find it.
 
 ## Risks
 
 - **A committed `uv.lock` with three torch variants is large** and will show up in
   dependency-bump diffs. Acceptable, and far better than the current situation of
   no lock at all.
-- **The CUDA version is pinned by index URL** (`cu126`). Moving CUDA versions means
+- **The CUDA version is pinned by index URL** (`cu124`). Moving CUDA versions means
   editing the index URL, not just a version constraint. Worth a comment in the file.
-- **Contributors need uv installed.** The current dependency exports and lock
-  validation were verified with uv 0.12.12; normal locked syncs remain
-  compatible with the supported local toolchain.
+- **Contributors need uv installed.** Keeping `requirements.txt` generated via
+  `uv export` during a transition period would avoid a hard cutover; decide in the
+  migration ticket whether that is worth the duplication.
 
 ## Method
 
-The original evaluation used uv 0.8.20. The current cu126/Torch 2.14 dependency
-graph was re-locked and re-verified with uv 0.12.12. The resulting `uv.lock` and
-target exports were inspected for the source URL, version, and selection markers
-of each Torch, CUDA, and MLX entry. The failures described above are preserved
-historical command results, not anticipated problems.
+`uv 0.8.20`. Each configuration above was actually locked, and the resulting
+`uv.lock` inspected for the source URL and markers of each torch and mlx entry.
+The failures described are real command output, not anticipated problems. No
+package was installed into this project and no dependency version was changed.

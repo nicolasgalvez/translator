@@ -52,20 +52,11 @@
             color: #888;
             white-space: nowrap;
         }
-        .corruption-notice {
-            color: #ffca70;
-            font-size: 0.8rem;
-        }
         .empty {
             text-align: center;
             color: #555;
             margin-top: 4rem;
             font-size: 1rem;
-        }
-        .notice {
-            margin-bottom: 1rem;
-            color: #a0c4ff;
-            font-size: 0.85rem;
         }
     </style>
 </head>
@@ -77,20 +68,11 @@
     </header>
     <div class="container">
         {% if transcripts %}
-        {% if sessions_truncated %}
-        <div class="notice">Showing the {{ session_limit }} newest sessions.</div>
-        {% endif %}
         <div class="transcript-list">
             {% for t in transcripts %}
             <a class="transcript-item" href="/history/{{ t.filename }}">
                 <span class="transcript-label">{{ t.label }}</span>
-                <span class="transcript-count">{{ t.count }}{% if t.count_truncated %}+{% endif %} segments</span>
-                {% if t.skipped_records %}
-                <span class="corruption-notice">{{ t.skipped_records }} damaged record{% if t.skipped_records != 1 %}s{% endif %} skipped{% if t.scan_truncated %} in inspected history{% endif %}</span>
-                {% endif %}
-                {% if t.scan_truncated %}
-                <span class="corruption-notice">History inspection stopped at its read limit.</span>
-                {% endif %}
+                <span class="transcript-count">{{ t.count }} segments</span>
             </a>
             {% endfor %}
         </div>

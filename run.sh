@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HOST=127.0.0.1
 PORT=8765
 MODEL=small
-DEVICE=default
+DEVICE="BlackHole 2ch"
 BACKEND=faster-whisper
 LANGUAGE=es
 FRONTEND_DEV=0
@@ -20,7 +20,7 @@ usage() {
     echo "  -H, --host HOST      Bind address (default: 127.0.0.1)"
     echo "  -p, --port PORT      Server port (default: 8765)"
     echo "  -m, --model MODEL    Whisper model: tiny, base, small, medium, large-v3 (default: small)"
-    echo "  -d, --device DEVICE  Audio input name or 'default' for the system microphone (default: default)"
+    echo "  -d, --device DEVICE  Audio input device name (default: BlackHole 2ch)"
     echo "  -b, --backend NAME   Transcription backend: faster-whisper, mlx-whisper (default: faster-whisper)"
     echo "  -l, --language CODE  Spoken language, e.g. en, es, ja, or 'auto' to detect (default: es)"
     echo "      --frontend-dev   Start the Vite dev server on http://127.0.0.1:5173"
@@ -43,52 +43,20 @@ usage() {
     echo "  $0 --port 9000 --model medium"
 }
 
-is_launcher_option() {
-    case $1 in
-        -H|--host|-p|--port|-m|--model|-d|--device|-b|--backend|-l|--language|\
-        --frontend-dev|--skip-frontend-build|-h|--help) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-require_option_value() {
-    if [ "$#" -lt 2 ] || is_launcher_option "$2"; then
-        echo "translator: $1 requires a value" >&2
-        exit 2
-    fi
-}
-
 while [[ $# -gt 0 ]]; do
     case $1 in
-        -H|--host)   require_option_value "$@"; HOST="$2"; shift 2 ;;
-        -p|--port)   require_option_value "$@"; PORT="$2"; shift 2 ;;
-        -m|--model)  require_option_value "$@"; MODEL="$2"; shift 2 ;;
-        -d|--device) require_option_value "$@"; DEVICE="$2"; shift 2 ;;
-        -b|--backend) require_option_value "$@"; BACKEND="$2"; shift 2 ;;
-        -l|--language) require_option_value "$@"; LANGUAGE="$2"; shift 2 ;;
+        -H|--host)   HOST="$2"; shift 2 ;;
+        -p|--port)   PORT="$2"; shift 2 ;;
+        -m|--model)  MODEL="$2"; shift 2 ;;
+        -d|--device) DEVICE="$2"; shift 2 ;;
+        -b|--backend) BACKEND="$2"; shift 2 ;;
+        -l|--language) LANGUAGE="$2"; shift 2 ;;
         --frontend-dev) FRONTEND_DEV=1; shift ;;
         --skip-frontend-build) SKIP_FRONTEND_BUILD=1; shift ;;
         -h|--help)   usage; exit 0 ;;
         *) echo "Unknown option: $1"; usage; exit 1 ;;
     esac
 done
-
-export TRANSLATOR_HOST="$HOST"
-export TRANSLATOR_PORT="$PORT"
-export TRANSLATOR_MODEL="$MODEL"
-export TRANSLATOR_DEVICE="$DEVICE"
-export TRANSLATOR_BACKEND="$BACKEND"
-export TRANSLATOR_LANGUAGE="$LANGUAGE"
-
-python3 "$SCRIPT_DIR/scripts/validate_runtime_config.py"
-
-if [ -f "$SCRIPT_DIR/frontend/package.json" ]; then
-    if ! command -v node >/dev/null 2>&1; then
-        echo "Node.js is required but was not found. Install Node.js 22.12 through 22.x, 24.x, or 26+ (supported range: ^22.12.0 || ^24.0.0 || >=26.0.0), then try again." >&2
-        exit 1
-    fi
-    node "$SCRIPT_DIR/frontend/scripts/node-version-policy.js"
-fi
 
 # uv creates and syncs .venv from uv.lock on demand, so there is no first-run
 # branch, no manual activation, and no "is mlx_whisper importable yet" probe —
@@ -152,6 +120,13 @@ if [ -f "$SCRIPT_DIR/frontend/package.json" ]; then
         echo "Frontend up to date - skipping build."
     fi
 fi
+
+export TRANSLATOR_HOST="$HOST"
+export TRANSLATOR_PORT="$PORT"
+export TRANSLATOR_MODEL="$MODEL"
+export TRANSLATOR_DEVICE="$DEVICE"
+export TRANSLATOR_BACKEND="$BACKEND"
+export TRANSLATOR_LANGUAGE="$LANGUAGE"
 
 echo "Starting transcriber (host=$HOST, port=$PORT, model=$MODEL, device=$DEVICE, backend=$BACKEND, language=$LANGUAGE)"
 cd "$SCRIPT_DIR"

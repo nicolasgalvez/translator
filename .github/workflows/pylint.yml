@@ -2,10 +2,6 @@ name: Pylint
 
 on:
   workflow_call:
-    inputs:
-      candidate_sha:
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -17,9 +13,6 @@ jobs:
     timeout-minutes: 15
     steps:
     - uses: actions/checkout@v7
-      with:
-        ref: ${{ inputs.candidate_sha || github.sha }}
-        persist-credentials: false
     - name: Set up Python
       uses: actions/setup-python@v7
       with:
@@ -27,13 +20,13 @@ jobs:
     - name: Install uv
       uses: astral-sh/setup-uv@v7
       with:
-        enable-cache: false
-        restore-cache: false
-        save-cache: false
+        enable-cache: true
+        cache-dependency-glob: uv.lock
     - name: Install dependencies
       # The CPU torch index is declared in pyproject.toml, so the hand-rolled
       # pre-install of a CPU wheel that used to live here is no longer needed —
       # --extra cpu selects it from the lockfile.
       run: uv sync --locked --group dev --extra cpu
-    - name: Analyze the code with Pylint
-      run: uv run --locked --extra cpu python scripts/lint_python.py
+    - name: Analysing the code with pylint
+      run: |
+        uv run pylint $(git ls-files '*.py')
