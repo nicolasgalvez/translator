@@ -73,6 +73,7 @@ if [ "$BACKEND" = "mlx-whisper" ]; then
     SYNC_ARGS+=(--extra mlx)
 fi
 (cd "$SCRIPT_DIR" && uv sync "${SYNC_ARGS[@]}")
+(cd "$SCRIPT_DIR" && uv run --no-sync python scripts/git_hooks.py install)
 
 # True when any build input is newer than the bundle, or there is no bundle.
 # dist/index.html is the reference because vite always emits it, so its mtime

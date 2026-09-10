@@ -7,8 +7,8 @@ on:
   push:
     branches: [main]
     paths-ignore: ["**/*.md", "docs/**"]
+  # The required job must exist on every pull request, including docs-only PRs.
   pull_request:
-    paths-ignore: ["**/*.md", "docs/**"]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -22,3 +22,21 @@ jobs:
     uses: ./.github/workflows/pylint.yml
   test:
     uses: ./.github/workflows/pytest.yml
+  policy:
+    uses: ./.github/workflows/project-policy.yml
+  required:
+    name: required
+    if: always()
+    needs: [lint, test, policy]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Enforce required check results
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          POLICY_RESULT: ${{ needs.policy.result }}
+        run: |
+          test "$LINT_RESULT" = success
+          test "$TEST_RESULT" = success
+          test "$POLICY_RESULT" = success
