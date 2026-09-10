@@ -33,7 +33,7 @@ branch ruleset.
 | --- | --- | --- |
 | Whitespace, YAML, merge markers, and file size | `pre-commit` stage | Project policy workflow |
 | Python lint | `pre-commit` stage | Dedicated Pylint workflow |
-| Secret scanning | Gitleaks at `pre-commit` | Gitleaks through the project policy workflow |
+| Secret scanning | Gitleaks at `pre-commit` | Official Gitleaks action scans the candidate and pull request history |
 | Conventional Commits | `conventional-pre-commit` at `commit-msg` | Every commit in the pull request range |
 | Existing user-level hooks | Chained after repository policy | Not applicable |
 | Merge gate | Not applicable | Stable `required` job on every pull request |

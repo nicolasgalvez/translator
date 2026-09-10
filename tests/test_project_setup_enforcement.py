@@ -130,6 +130,7 @@ def test_ci_policy_runs_the_repository_pre_commit_checks():
     ).read_text(encoding="utf-8")
 
     assert "  workflow_call:" in workflow
+    assert "uses: gitleaks/gitleaks-action@v3" in workflow
     assert "pre-commit run --all-files" in workflow
-    assert "SKIP: pylint" in workflow
+    assert "SKIP: pylint,gitleaks" in workflow
     assert "scripts/check-commit-messages.sh" in workflow
