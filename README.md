@@ -61,7 +61,9 @@ The transcriber captures system audio through [BlackHole](https://existential.au
 ./run.sh
 ```
 
-First run creates a Python virtual environment, installs Python dependencies, installs frontend dependencies, builds the React app, and starts FastAPI at `http://localhost:8765`.
+First run creates a Python virtual environment, installs Python dependencies,
+enables the repository's tracked Git hooks, installs frontend dependencies,
+builds the React app, and starts FastAPI at `http://localhost:8765`.
 
 ### Frontend Dev Server
 
@@ -144,6 +146,11 @@ Linux device interface. Use native `./run.sh` for the Mac demo.
 cd frontend
 npm test
 ```
+
+The normal quick start enables the tracked hooks automatically. To enable them
+without starting the app, run `uv sync --group dev` followed by
+`./scripts/install-git-hooks.sh`. Commits then run staged lint and secret checks,
+and commit messages must follow the Conventional Commits format.
 
 The existing chunking test still verifies silence-based audio splitting against a real fixture:
 

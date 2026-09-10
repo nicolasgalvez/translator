@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+set -eu
+repository_root=$(git rev-parse --show-toplevel)
+exec uv run --no-sync python "$repository_root/scripts/git_hooks.py" run prepare-commit-msg "$@"
