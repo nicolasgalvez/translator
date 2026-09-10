@@ -134,3 +134,16 @@ def test_ci_policy_runs_the_repository_pre_commit_checks():
     assert "pre-commit run --all-files" in workflow
     assert "SKIP: pylint,gitleaks" in workflow
     assert "scripts/check-commit-messages.sh" in workflow
+
+
+def test_public_readiness_report_records_complete_delivery():
+    report = (
+        REPOSITORY_ROOT / "docs" / "reports" / "public-readiness-and-project-setup.md"
+    ).read_text(encoding="utf-8")
+
+    for ticket in ("TRAN-71", "TRAN-73", "TRAN-74"):
+        assert f"/browse/{ticket}" in report
+    for pull_request in (81, 82, 83):
+        assert f"/pull/{pull_request}" in report
+    assert "All three delivery pull requests are merged" in report
+    assert "Official Gitleaks action" in report
