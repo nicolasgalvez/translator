@@ -46,6 +46,20 @@ Git does not execute repository files automatically when a clone is created.
 The setup command is therefore the local bootstrap boundary; the required CI
 gate is the server-side backstop for a clone that has not run setup yet.
 
+## Agent configuration
+
+The project contains 51 locked skills under `.agents/skills` and 51 corresponding
+Claude Code links under `.claude/skills`. The skills CLI reports all 51 at project
+scope, every link resolves to its canonical directory, and Gitleaks found no leak
+in the 620 KB of installed skill source. `AGENTS.md` routes agents to Jira project
+`TRAN`, the repository's triage labels, and the domain-document conventions.
+The two upstream sources are MIT-licensed, and their license notices are retained
+under `.agents/LICENSES`.
+
+The formatting hooks exclude `.agents/` because those files are locked
+third-party sources whose hashes must not be changed locally. Secret scanning,
+merge-marker detection, and file-size checks still cover them.
+
 ## Verification commands
 
 ```text

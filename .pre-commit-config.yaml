@@ -4,7 +4,10 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
+        # Project skills are locked third-party sources; preserve their hashes.
+        exclude: ^\.agents/
       - id: end-of-file-fixer
+        exclude: ^\.agents/
       - id: check-yaml
       - id: check-merge-conflict
       - id: check-added-large-files
