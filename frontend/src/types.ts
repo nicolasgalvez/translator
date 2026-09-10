@@ -13,13 +13,5 @@ export interface TranscriptMessage {
   event: TranscriptEvent
 }
 
-export interface StatusMessage {
-  type: "status"
-  status: "recording-error"
-  message: string
-}
-
-export type ServerMessage = TranscriptMessage | StatusMessage
-
 export type TranscriptFilter = (event: TranscriptEvent) => TranscriptEvent
 export type MainPaneRenderer = (events: TranscriptEvent[]) => ReactNode

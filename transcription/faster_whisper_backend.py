@@ -15,7 +15,7 @@ class FasterWhisperBackend(TranscriptionBackend):
         import ctranslate2
 
         try:
-            if "float16" in ctranslate2.get_supported_compute_types("cuda"):
+            if "cuda" in ctranslate2.get_supported_compute_types("cuda"):
                 device, compute_type = "cuda", "float16"
             else:
                 device, compute_type = "cpu", "int8"

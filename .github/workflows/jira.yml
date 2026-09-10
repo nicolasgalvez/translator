@@ -2,22 +2,18 @@ name: Jira
 
 # Cost rule: ONE job, one runner per event (every job bills a 1-min minimum).
 # No `synchronize` — pushes to an open PR don't need Jira churn; sync/QA
-# happen at open, Done at merge. `pull_request_target` keeps this workflow
-# base-owned; it never checks out or executes candidate code. `ci-failure` is
-# guarded on the run conclusion so a green CI run starts no runner at all.
+# happen at open, Done at merge. `ci-failure` is guarded on the run conclusion
+# so a green CI run starts no runner at all.
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, reopened, closed]
   workflow_run:
-    workflows: ["CI", "Required"]
+    workflows: ["CI"]
     types: [completed]
-
-permissions:
-  contents: read
 
 jobs:
   jira:
-    if: github.event_name == 'pull_request_target'
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -93,9 +89,8 @@ jobs:
             echo "  ✓ $key → $TARGET_COLUMN"
           done
 
-  # Files a Jira ticket when a required workflow goes red, including for PRs
-  # that carry no issue key at all — a failing dependabot PR would otherwise
-  # fail silently. The
+  # Files a Jira ticket when CI goes red, including for PRs that carry no issue
+  # key at all — a failing dependabot PR would otherwise fail silently. The
   # action dedupes by label, so repeated failures on one PR reuse a single open
   # ticket.
   #

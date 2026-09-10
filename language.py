@@ -5,8 +5,6 @@ it". Everything else it rejects — including the empty string, which is easy to
 produce by accident and only surfaces once audio is already flowing.
 """
 
-from __future__ import annotations
-
 # Whisper's accepted codes, including `yue`, which arrived with large-v3.
 #
 # Deliberately a literal rather than an import from faster-whisper or
