@@ -288,7 +288,7 @@ async def index(request: Request):
     index_file = FRONTEND_DIST / "index.html"
     if index_file.exists():
         return FileResponse(index_file)
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="index.html")
 
 
 @app.get("/history", response_class=HTMLResponse)
@@ -312,8 +312,7 @@ async def history(request: Request):
             "label": label,
             "count": len(entries),
         })
-    return templates.TemplateResponse("history.html", {
-        "request": request,
+    return templates.TemplateResponse(request=request, name="history.html", context={
         "transcripts": transcripts,
     })
 
@@ -335,8 +334,7 @@ async def view_transcript(request: Request, filename: str):
         label = stem
     audio_wav = TRANSCRIPTS_DIR / f"{stem}.wav"
     has_audio = audio_wav.exists()
-    return templates.TemplateResponse("view.html", {
-        "request": request,
+    return templates.TemplateResponse(request=request, name="view.html", context={
         "label": label,
         "entries": entries,
         "has_audio": has_audio,
@@ -559,7 +557,7 @@ def caption_worker(job_id: str, video_path: Path):
 
 @app.get("/captions", response_class=HTMLResponse)
 async def captions_page(request: Request):
-    return templates.TemplateResponse("captions.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="captions.html")
 
 
 @app.post("/captions/upload")
