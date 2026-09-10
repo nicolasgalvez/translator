@@ -30,7 +30,7 @@ branch ruleset.
 | Control | Local enforcement | Pull request enforcement |
 | --- | --- | --- |
 | Whitespace, YAML, merge markers, and file size | `pre-commit` stage | Project policy workflow |
-| Python lint | `pre-commit` stage | Pylint plus project policy workflows |
+| Python lint | `pre-commit` stage | Dedicated Pylint workflow |
 | Secret scanning | Gitleaks at `pre-commit` | Gitleaks through the project policy workflow |
 | Conventional Commits | `conventional-pre-commit` at `commit-msg` | Every commit in the pull request range |
 | Existing user-level hooks | Chained after repository policy | Not applicable |
