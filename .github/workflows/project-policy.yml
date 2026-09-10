@@ -17,6 +17,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Scan repository and pull request history for secrets
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
@@ -32,7 +37,7 @@ jobs:
       - name: Run repository checks
         env:
           # The dedicated lint job installs runtime dependencies and runs Pylint.
-          SKIP: pylint
+          SKIP: pylint,gitleaks
         run: uv run --only-group dev pre-commit run --all-files
 
       - name: Check pull request commit messages
