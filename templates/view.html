@@ -78,6 +78,9 @@
             color: #888;
             margin-bottom: 0.15rem;
         }
+        .entry .speaker { font-weight: 600; color: #f4a261; }
+        .panel.es .entry.mic { background: rgba(76, 201, 240, 0.08); border-left-color: #4cc9f0; }
+        .entry.mic .speaker { color: #4cc9f0; }
     </style>
 </head>
 <body>
@@ -98,8 +101,9 @@
             <div class="panel-header">Transcript</div>
             <div class="panel-content">
                 {% for e in entries %}
-                <div class="entry">
-                    <div class="time">{{ e.time }}</div>
+                {% set source = (e.metadata or {}).get("source") %}
+                <div class="entry{% if speaker_labels and source == 'mic' %} mic{% endif %}">
+                    <div class="time">{{ e.time }}{% if speaker_labels and source in speaker_labels %} · <span class="speaker">{{ speaker_labels[source] }}</span>{% endif %}</div>
                     <div>{{ e.text if e.text is defined else e.es }}</div>
                 </div>
                 {% endfor %}

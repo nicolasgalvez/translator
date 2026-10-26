@@ -80,6 +80,9 @@ This starts Vite at `http://127.0.0.1:5173` and FastAPI at `http://localhost:876
 ./run.sh --port 9000
 ./run.sh --host 0.0.0.0
 ./run.sh --device "MacBook Pro Microphone"
+./run.sh --mic
+./run.sh --mic "Shure MV5"
+./run.sh --record-only --mic
 ./run.sh --backend mlx-whisper
 ./run.sh --skip-frontend-build
 ```
@@ -127,6 +130,25 @@ Captures system audio in real time, transcribes Spanish with Whisper, saves tran
 ### Transcript History (`/history`)
 
 Browse saved transcript sessions. Each session saves a `.jsonl` transcript and a `.wav` audio recording.
+
+### Mic Recording (`--mic`)
+
+Records a microphone to `transcripts/<session>.mic.wav` alongside the live session,
+for example to keep your side of an interview. The mic is not transcribed live; it is
+transcribed when the session is processed (see below). Bare `--mic` records the system default input; `--mic NAME` records the
+first input device whose name contains `NAME`. `./run.sh --list-mics` lists the
+devices it can record and marks the system default.
+
+### Record-Only Mode (`--record-only`)
+
+Records the session audio (and the mic, with `--mic`) without transcribing it live.
+Afterward, open `/history` and press **Process** on the session to transcribe the
+recording in one pass. The result is saved as the session's `.jsonl` transcript.
+Process is offered for any finished session that has audio and no transcript. When
+the session has a mic recording, it is transcribed too and merged in by time, and the
+transcript view labels each line **Remote** (system audio) or **You** (mic). Wear
+headphones: without them the mic also picks up the remote side, which then appears
+twice.
 
 ### Video Captions (`/captions`)
 
