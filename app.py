@@ -21,6 +21,8 @@ from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
 from language import LanguageOption
+from mic_recorder import MicRecorder
+from session_processor import SessionProcessor
 from plugin_loader import load_plugins
 from transcript_events import process_transcript_text, queue_transcript_render_event
 from transcription import get_backend
@@ -31,6 +33,8 @@ PORT = int(os.environ.get("TRANSLATOR_PORT", "8765"))
 MODEL = os.environ.get("TRANSLATOR_MODEL", "small")
 DEVICE_NAME = os.environ.get("TRANSLATOR_DEVICE", "BlackHole 2ch")
 BACKEND = os.environ.get("TRANSLATOR_BACKEND", "faster-whisper")
+# Record-only: capture audio but skip live transcription; process it later from /history.
+RECORD_ONLY = os.environ.get("TRANSLATOR_RECORD_ONLY", "") == "1"
 
 # Fail here, on one clear line, rather than once per utterance forever: the
 # transcribe call is wrapped in a broad except so a bad language would otherwise
@@ -55,10 +59,19 @@ async def lifespan(_app: FastAPI):
     # Capture thread: records audio continuously via sd.rec()
     threading.Thread(target=audio_capture_loop, daemon=True).start()
     # Processing thread: transcribes chunks from the queue
-    threading.Thread(target=audio_process_loop, daemon=True).start()
+    if RECORD_ONLY:
+        print("Record-only mode: live transcription is off", flush=True)
+    else:
+        threading.Thread(target=audio_process_loop, daemon=True).start()
     broadcast = asyncio.create_task(broadcast_loop())
+    if mic_recorder:
+        mic_recorder.start()
+        print(f"Recording mic: {mic_recorder.device_name} -> {mic_recorder.path}", flush=True)
 
     yield
+
+    if mic_recorder:
+        mic_recorder.stop()
 
     # The two threads are daemons and die with the process. The broadcast task
     # is ours, and an un-cancelled task makes shutdown hang waiting on a loop
@@ -116,6 +129,19 @@ session_stem = session_start.strftime('%Y-%m-%d_%H%M%S')
 transcript_file = TRANSCRIPTS_DIR / f"{session_stem}.jsonl"
 audio_file = TRANSCRIPTS_DIR / f"{session_stem}.wav"
 print(f"Transcript auto-saving to: {transcript_file}", flush=True)
+
+# Optional mic record: saved next to the session, never transcribed.
+try:
+    mic_recorder = MicRecorder.from_env(
+        os.environ, TRANSCRIPTS_DIR / f"{session_stem}.mic.wav", sample_rate=SAMPLE_RATE
+    )
+except ValueError as exc:
+    sys.exit(f"translator: {exc}")
+
+session_processor = SessionProcessor(
+    backend, TRANSCRIPTS_DIR, language=LANGUAGE.code,
+    context={"backend": backend.name, "model": MODEL}, active_stem=session_stem,
+)
 
 # Open WAV file for appending audio chunks (48kHz mono 16-bit)
 wav_writer = wave.open(str(audio_file), "wb")
@@ -186,8 +212,9 @@ def audio_capture_loop():
                 with wav_lock:
                     wav_writer.writeframes(pcm.tobytes())
 
-                # Hand off to processing thread
-                audio_chunk_queue.put(audio)
+                # Hand off to processing thread, which does not run in record-only mode
+                if not RECORD_ONLY:
+                    audio_chunk_queue.put(audio)
 
             # A dropped read must not end the capture thread.
             except Exception as e:  # pylint: disable=broad-exception-caught
@@ -293,28 +320,51 @@ async def index(request: Request):
 
 @app.get("/history", response_class=HTMLResponse)
 async def history(request: Request):
-    files = sorted(TRANSCRIPTS_DIR.glob("*.jsonl"), reverse=True)
+    # A session is a transcript, a recording, or both. Record-only sessions have
+    # only the WAV until processed; `.mic.wav` files belong to their session.
+    stems = {f.stem for f in TRANSCRIPTS_DIR.glob("*.jsonl")}
+    stems |= {f.stem for f in TRANSCRIPTS_DIR.glob("*.wav") if not f.stem.endswith(".mic")}
     transcripts = []
-    for f in files:
+    for stem in sorted(stems, reverse=True):
+        f = TRANSCRIPTS_DIR / f"{stem}.jsonl"
         entries = []
-        for line in f.read_text().strip().splitlines():
-            if line:
-                entries.append(json.loads(line))
-        # Derive display name from filename: 2025-03-02_183045.jsonl
-        stem = f.stem  # e.g. "2025-03-02_183045"
+        if f.exists():
+            for line in f.read_text().strip().splitlines():
+                if line:
+                    entries.append(json.loads(line))
+        # Derive display name from the stem, e.g. "2025-03-02_183045"
         try:
             dt = datetime.strptime(stem, "%Y-%m-%d_%H%M%S")
             label = dt.strftime("%B %d, %Y at %I:%M %p")
         except ValueError:
             label = stem
         transcripts.append({
-            "filename": f.name,
+            "stem": stem,
+            "filename": f.name if f.exists() else None,
             "label": label,
             "count": len(entries),
+            "recording": stem == session_stem,
+            "can_process": session_processor.can_process(stem),
         })
     return templates.TemplateResponse(request=request, name="history.html", context={
         "transcripts": transcripts,
     })
+
+
+@app.post("/history/{stem}/process")
+async def process_session(stem: str):
+    try:
+        return JSONResponse(session_processor.start(stem))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.get("/history/{stem}/process")
+async def process_session_status(stem: str):
+    job = session_processor.status(stem)
+    if not job:
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    return JSONResponse(job)
 
 
 @app.get("/history/{filename}", response_class=HTMLResponse)
@@ -334,9 +384,12 @@ async def view_transcript(request: Request, filename: str):
         label = stem
     audio_wav = TRANSCRIPTS_DIR / f"{stem}.wav"
     has_audio = audio_wav.exists()
+    # Label who spoke only when the mic is in the transcript; otherwise every line is "Remote".
+    has_speakers = any(e.get("metadata", {}).get("source") == "mic" for e in entries)
     return templates.TemplateResponse(request=request, name="view.html", context={
         "label": label,
         "entries": entries,
+        "speaker_labels": SessionProcessor.SOURCE_LABELS if has_speakers else {},
         "has_audio": has_audio,
         "audio_url": f"/audio/{stem}.wav" if has_audio else None,
     })

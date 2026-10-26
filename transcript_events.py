@@ -9,13 +9,17 @@ from typing import Any
 from hooks import apply_filters, do_action
 
 
-def create_transcript_event(text: str, now: datetime | None = None) -> dict[str, Any]:
+def create_transcript_event(
+    text: str,
+    now: datetime | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     now = now or datetime.now()
     return {
         "id": uuid.uuid4().hex,
         "text": text,
         "time": now.strftime("%H:%M:%S"),
-        "metadata": {},
+        "metadata": dict(metadata or {}),
     }
 
 
@@ -25,12 +29,13 @@ def process_transcript_text(
     *,
     context: dict[str, Any] | None = None,
     now: datetime | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     stripped = text.strip()
     if not stripped:
         return None
 
-    event = create_transcript_event(stripped, now=now)
+    event = create_transcript_event(stripped, now=now, metadata=metadata)
     hook_context = {"transcript_file": transcript_file, **(context or {})}
 
     event = apply_filters("transcript.before_save", event, hook_context)

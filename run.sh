@@ -8,6 +8,9 @@ HOST=127.0.0.1
 PORT=8765
 MODEL=small
 DEVICE="BlackHole 2ch"
+MIC=
+LIST_MICS=0
+RECORD_ONLY=0
 BACKEND=faster-whisper
 LANGUAGE=es
 FRONTEND_DEV=0
@@ -21,6 +24,10 @@ usage() {
     echo "  -p, --port PORT      Server port (default: 8765)"
     echo "  -m, --model MODEL    Whisper model: tiny, base, small, medium, large-v3 (default: small)"
     echo "  -d, --device DEVICE  Audio input device name (default: BlackHole 2ch)"
+    echo "      --mic [DEVICE]   Also record a mic to <session>.mic.wav, not transcribed"
+    echo "                       (default device: the system default input)"
+    echo "      --list-mics      List the devices --mic can record, then exit"
+    echo "      --record-only    Record without live transcription; process later from /history"
     echo "  -b, --backend NAME   Transcription backend: faster-whisper, mlx-whisper (default: faster-whisper)"
     echo "  -l, --language CODE  Spoken language, e.g. en, es, ja, or 'auto' to detect (default: es)"
     echo "      --frontend-dev   Start the Vite dev server on http://127.0.0.1:5173"
@@ -49,6 +56,11 @@ while [[ $# -gt 0 ]]; do
         -p|--port)   PORT="$2"; shift 2 ;;
         -m|--model)  MODEL="$2"; shift 2 ;;
         -d|--device) DEVICE="$2"; shift 2 ;;
+        --mic)
+            # The device name is optional: bare --mic records the system default input.
+            if [[ $# -gt 1 && "$2" != -* ]]; then MIC="$2"; shift 2; else MIC=default; shift; fi ;;
+        --list-mics) LIST_MICS=1; shift ;;
+        --record-only) RECORD_ONLY=1; shift ;;
         -b|--backend) BACKEND="$2"; shift 2 ;;
         -l|--language) LANGUAGE="$2"; shift 2 ;;
         --frontend-dev) FRONTEND_DEV=1; shift ;;
@@ -73,6 +85,11 @@ if [ "$BACKEND" = "mlx-whisper" ]; then
     SYNC_ARGS+=(--extra mlx)
 fi
 (cd "$SCRIPT_DIR" && uv sync "${SYNC_ARGS[@]}")
+
+if [ "$LIST_MICS" = "1" ]; then
+    (cd "$SCRIPT_DIR" && uv run --no-sync python mic_recorder.py)
+    exit 0
+fi
 (cd "$SCRIPT_DIR" && uv run --no-sync python scripts/git_hooks.py install)
 
 # True when any build input is newer than the bundle, or there is no bundle.
@@ -128,7 +145,9 @@ export TRANSLATOR_MODEL="$MODEL"
 export TRANSLATOR_DEVICE="$DEVICE"
 export TRANSLATOR_BACKEND="$BACKEND"
 export TRANSLATOR_LANGUAGE="$LANGUAGE"
+export TRANSLATOR_MIC="$MIC"
+export TRANSLATOR_RECORD_ONLY="$RECORD_ONLY"
 
-echo "Starting transcriber (host=$HOST, port=$PORT, model=$MODEL, device=$DEVICE, backend=$BACKEND, language=$LANGUAGE)"
+echo "Starting transcriber (host=$HOST, port=$PORT, model=$MODEL, device=$DEVICE, mic=${MIC:-off}, record_only=$RECORD_ONLY, backend=$BACKEND, language=$LANGUAGE)"
 cd "$SCRIPT_DIR"
 uv run python app.py

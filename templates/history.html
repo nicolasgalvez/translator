@@ -52,6 +52,18 @@
             color: #888;
             white-space: nowrap;
         }
+        div.transcript-item:hover { border-color: #0f3460; }
+        .process-btn {
+            font: inherit;
+            font-size: 0.85rem;
+            color: #e0e0e0;
+            background: #e94560;
+            border: none;
+            border-radius: 6px;
+            padding: 0.4rem 0.9rem;
+            cursor: pointer;
+        }
+        .process-btn:disabled { opacity: 0.5; cursor: default; }
         .empty {
             text-align: center;
             color: #888;
@@ -70,15 +82,59 @@
         {% if transcripts %}
         <div class="transcript-list">
             {% for t in transcripts %}
+            {% if t.filename %}
             <a class="transcript-item" href="/history/{{ t.filename }}">
                 <span class="transcript-label">{{ t.label }}</span>
                 <span class="transcript-count">{{ t.count }} segments</span>
             </a>
+            {% else %}
+            <div class="transcript-item">
+                <span class="transcript-label">{{ t.label }}</span>
+                {% if t.recording %}
+                <span class="transcript-count">Recording...</span>
+                {% elif t.can_process %}
+                <span class="transcript-count" data-status-for="{{ t.stem }}">Not transcribed</span>
+                <button class="process-btn" data-stem="{{ t.stem }}">Process</button>
+                {% endif %}
+            </div>
+            {% endif %}
             {% endfor %}
         </div>
         {% else %}
         <div class="empty">No transcripts yet. Start transcribing to create one.</div>
         {% endif %}
     </div>
+    <script>
+        async function poll(stem, statusEl, button) {
+            const res = await fetch(`/history/${stem}/process`);
+            const job = await res.json();
+            if (job.status === 'done') {
+                location.reload();
+                return;
+            }
+            if (job.status === 'error' || !res.ok) {
+                statusEl.textContent = `Failed: ${job.message || job.error}`;
+                button.disabled = false;
+                return;
+            }
+            statusEl.textContent = job.message;
+            setTimeout(() => poll(stem, statusEl, button), 2000);
+        }
+
+        document.querySelectorAll('.process-btn').forEach(button => {
+            button.addEventListener('click', async () => {
+                const stem = button.dataset.stem;
+                const statusEl = document.querySelector(`[data-status-for="${stem}"]`);
+                button.disabled = true;
+                const res = await fetch(`/history/${stem}/process`, { method: 'POST' });
+                if (!res.ok) {
+                    statusEl.textContent = `Failed: ${(await res.json()).error}`;
+                    button.disabled = false;
+                    return;
+                }
+                poll(stem, statusEl, button);
+            });
+        });
+    </script>
 </body>
 </html>
