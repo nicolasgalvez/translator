@@ -32,7 +32,9 @@ cpu = ["torch; sys_platform == 'linux'"]
 cuda = ["torch; sys_platform == 'linux'"]
 
 [dependency-groups]
-dev = ["pytest", "pylint", "pre-commit"]
+# numpy and scipy let CI's dev-only test job import the audio modules
+# (mic_recorder, session_processor) without syncing torch.
+dev = ["pytest", "pylint", "pre-commit", "numpy", "scipy"]
 
 [tool.uv]
 # `environments`, not `required-environments`: the latter demands wheels exist

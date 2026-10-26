@@ -2094,9 +2094,13 @@ mlx = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-translator-cpu' and extra == 'extra-10-translator-cuda')" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-translator-cpu' and extra == 'extra-10-translator-cuda')" },
     { name = "pre-commit" },
     { name = "pylint" },
     { name = "pytest" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-translator-cpu' and extra == 'extra-10-translator-cuda')" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-translator-cpu' and extra == 'extra-10-translator-cuda')" },
 ]
 
 [package.metadata]
@@ -2119,9 +2123,11 @@ provides-extras = ["mlx", "cpu", "cuda"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "numpy" },
     { name = "pre-commit" },
     { name = "pylint" },
     { name = "pytest" },
+    { name = "scipy" },
 ]
 
 [[package]]
